@@ -196,41 +196,46 @@ def write_gemm(path: str) -> None:
 
 
 # (group size, K): G=32 spans several groups per warp step, G=128 is the production size.
-INT8_CASES = [(32, 320), (128, 384)]
+QUANT_CASES = [(32, 320), (128, 384)]
 QUANT_SEED = 7
 
 
-def add_int8_case(f: Fixture, prefix: str, rng, n_out: int, k_in: int, group: int) -> np.ndarray:
-    """Adds an int8 weight + scales; returns the dequantized weight the kernel should see."""
+def quantize_weight(f: Fixture, base: str, w: np.ndarray, bits: int, group: int) -> np.ndarray:
+    """Adds `base`.weight/.scales(/.mins) in the .llmbin layout; returns dequant(W), what the kernel sees."""
+    if bits == 8:
+        q, scales = quantize.quantize_int8(w, group)
+        f.add_raw(base + ".weight", binformat.DTYPE_INT8, q.shape, q)
+        deq = quantize.dequantize_int8(q, scales)
+    else:
+        q, scales, mins = quantize.quantize_int4(w, group)
+        f.add_raw(base + ".weight", binformat.DTYPE_INT4, w.shape, q)
+        f.add_raw(base + ".mins", binformat.DTYPE_FP16, mins.shape, mins.astype("<f2"))
+        deq = quantize.dequantize_int4(q, scales, mins)
+    f.add_raw(base + ".scales", binformat.DTYPE_FP16, scales.shape, scales.astype("<f2"))
+    return deq
+
+
+def random_weight(rng, n_out: int, k_in: int) -> np.ndarray:
     w = rng.standard_normal((n_out, k_in)).astype(np.float16).astype(np.float32)
     w[3] = 0.0  # all-zero groups: scale 0 must give exactly 0
-    q, scales = quantize.quantize_int8(w, group)
-    f.add_raw(prefix + "weight", binformat.DTYPE_INT8, q.shape, q)
-    f.add_raw(prefix + "scales", binformat.DTYPE_FP16, scales.shape, scales.astype("<f2"))
-    return quantize.dequantize_int8(q, scales)
+    return w
 
 
-def write_gemv_int8(path: str) -> None:
-    rng = np.random.default_rng(QUANT_SEED)
+def write_quant_matmul(path: str, bits: int, m_rows: int, seed: int) -> None:
+    """m_rows = 1 is the GEMV fixture (1-D input); otherwise the GEMM fixture."""
+    rng = np.random.default_rng(seed)
     f = Fixture()
-    for group, k_in in INT8_CASES:
+    for group, k_in in QUANT_CASES:
         p = f"g{group}."
-        w = torch.from_numpy(add_int8_case(f, p, rng, 130, k_in, group))
-        x = torch.from_numpy(rng.standard_normal(k_in).astype(np.float32))
-        f.add_fp32(p + "input", x)
-        f.add_fp32(p + "expected", w @ x)
-    f.write(path)
-
-
-def write_gemm_int8(path: str) -> None:
-    rng = np.random.default_rng(QUANT_SEED + 1)
-    f = Fixture()
-    for group, k_in in INT8_CASES:
-        p = f"g{group}."
-        w = torch.from_numpy(add_int8_case(f, p, rng, 130, k_in, group))
-        x = torch.from_numpy(rng.standard_normal((6, k_in)).astype(np.float32))
-        f.add_fp32(p + "input", x)
-        f.add_fp32(p + "expected", x @ w.t())
+        w = torch.from_numpy(quantize_weight(f, p.rstrip("."), random_weight(rng, 130, k_in), bits, group))
+        if m_rows == 1:
+            x = torch.from_numpy(rng.standard_normal(k_in).astype(np.float32))
+            f.add_fp32(p + "input", x)
+            f.add_fp32(p + "expected", w @ x)
+        else:
+            x = torch.from_numpy(rng.standard_normal((m_rows, k_in)).astype(np.float32))
+            f.add_fp32(p + "input", x)
+            f.add_fp32(p + "expected", x @ w.t())
     f.write(path)
 
 
@@ -299,7 +304,7 @@ class RefModel:
         self.tok_embeddings = w(c.vocab_size, c.hidden_size)
         self.output_norm = as_fp16(torch.ones(c.hidden_size) + 0.05 * rand(c.hidden_size))
         self.lm_head = w(c.vocab_size, c.hidden_size)
-        self.int8 = {}  # tensor base name -> (q, scales), filled by quantized_int8()
+        self.bits = 16  # 8 or 4 after quantized(): matmul weights are then written quantized
 
         self.layers = []
         for _ in range(c.num_layers):
@@ -319,11 +324,10 @@ class RefModel:
         f = Fixture(self.config)
 
         def add_linear(base: str, t: torch.Tensor) -> None:
-            if base not in self.int8:
+            if self.bits == 16:
                 return f.add_fp16(base + ".weight", t)
-            q, scales = self.int8[base]
-            f.add_raw(base + ".weight", binformat.DTYPE_INT8, q.shape, q)
-            f.add_raw(base + ".scales", binformat.DTYPE_FP16, scales.shape, scales.astype("<f2"))
+            # Quantizes the original weight, so the file holds exactly what quantized() dequantized.
+            quantize_weight(f, base, self.source[base], self.bits, self.group)
 
         f.add_fp16("tok_embeddings.weight", self.tok_embeddings)
         f.add_fp16("output_norm.weight", self.output_norm)
@@ -336,14 +340,14 @@ class RefModel:
                 add_linear(p + name, layer[key])
         f.write(path)
 
-    def quantized_int8(self, group: int) -> "RefModel":
-        """A copy whose matmul weights are dequant(quant(W)): what the INT8 engine computes with."""
+    def quantized(self, bits: int, group: int) -> "RefModel":
+        """A copy whose matmul weights are dequant(quant(W)): what the INT8/INT4 engine computes with."""
         out = copy.deepcopy(self)
+        out.bits, out.group, out.source = bits, group, {}
 
         def conv(base: str, t: torch.Tensor) -> torch.Tensor:
-            q, scales = quantize.quantize_int8(t.numpy(), group)
-            out.int8[base] = (q, scales)
-            return torch.from_numpy(quantize.dequantize_int8(q, scales))
+            out.source[base] = t.numpy()
+            return torch.from_numpy(quantize_weight(Fixture(), base, t.numpy(), bits, group))
 
         out.lm_head = conv("lm_head", self.lm_head)
         for i, layer in enumerate(out.layers):
@@ -413,8 +417,10 @@ FIXTURES = {
     "ref_attention.llmbin": write_attention,
     "ref_elementwise.llmbin": write_elementwise,
     # Own numpy seed, so adding these does not shift the torch stream above.
-    "ref_gemv_int8.llmbin": write_gemv_int8,
-    "ref_gemm_int8.llmbin": write_gemm_int8,
+    "ref_gemv_int8.llmbin": lambda path: write_quant_matmul(path, 8, 1, QUANT_SEED),
+    "ref_gemm_int8.llmbin": lambda path: write_quant_matmul(path, 8, 6, QUANT_SEED + 1),
+    "ref_gemv_int4.llmbin": lambda path: write_quant_matmul(path, 4, 1, QUANT_SEED + 2),
+    "ref_gemm_int4.llmbin": lambda path: write_quant_matmul(path, 4, 6, QUANT_SEED + 3),
 }
 
 
@@ -435,10 +441,11 @@ def main() -> None:
     model, prompt = write_forward(f"{out_dir}/ref_model.llmbin", f"{out_dir}/ref_forward.llmbin")
     print(f"wrote {out_dir}/ref_model.llmbin, {out_dir}/ref_forward.llmbin")
 
-    # Same model and prompt, INT8 weights: no extra randomness, so the FP16 fixtures above are unchanged.
-    write_forward(f"{out_dir}/ref_model_int8.llmbin", f"{out_dir}/ref_forward_int8.llmbin",
-                  model.quantized_int8(REF_GROUP), prompt)
-    print(f"wrote {out_dir}/ref_model_int8.llmbin, {out_dir}/ref_forward_int8.llmbin")
+    # Same model and prompt, quantized weights: no extra randomness, so the FP16 fixtures above are unchanged.
+    for bits in (8, 4):
+        model_path, ref_path = f"{out_dir}/ref_model_int{bits}.llmbin", f"{out_dir}/ref_forward_int{bits}.llmbin"
+        write_forward(model_path, ref_path, model.quantized(bits, REF_GROUP), prompt)
+        print(f"wrote {model_path}, {ref_path}")
 
 
 if __name__ == "__main__":

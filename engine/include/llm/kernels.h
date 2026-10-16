@@ -49,6 +49,16 @@ void launch_gemv_int8(const std::int8_t* weight, const __half* scales, const flo
 void launch_gemm_int8(const std::int8_t* weight, const __half* scales, const float* x, float* y,
                       int m_rows, int n_out, int k_in, int group_size, void* stream = nullptr);
 
+// INT4 versions: weight is [n_out, k_in / 2] bytes, two values per byte with even k in the
+// low nibble; scales and mins are FP16 [n_out, k_in / group_size], and w = q * scale + min.
+// Same requirements as INT8.
+void launch_gemv_int4(const std::uint8_t* weight, const __half* scales, const __half* mins,
+                      const float* x, float* y, int n_out, int k_in, int group_size,
+                      void* stream = nullptr);
+void launch_gemm_int4(const std::uint8_t* weight, const __half* scales, const __half* mins,
+                      const float* x, float* y, int m_rows, int n_out, int k_in, int group_size,
+                      void* stream = nullptr);
+
 // Appends `n_new` rows of freshly computed K and V into one layer's cache.
 // `new_k` and `new_v` are [n_new, kv_dim]; `k_cache` and `v_cache` are that
 // layer's [max_seq, kv_dim] slabs, and row i of the input lands at row

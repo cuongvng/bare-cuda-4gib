@@ -153,7 +153,15 @@ void matmul(const QuantWeight& w, const float* x, float* y, int m, int n, int k)
     }
     return;
   }
-  if (w.dtype != DType::kFP16) fail("no matmul kernel for INT4 weights yet");
+  if (w.dtype == DType::kINT4) {
+    const auto* q = static_cast<const std::uint8_t*>(w.data);
+    if (m == 1) {
+      launch_gemv_int4(q, w.scales, w.mins, x, y, n, k, w.group_size);
+    } else {
+      launch_gemm_int4(q, w.scales, w.mins, x, y, m, n, k, w.group_size);
+    }
+    return;
+  }
   if (m == 1) {
     launch_gemv_fp16(w.fp16(), x, y, n, k);
   } else {

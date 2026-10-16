@@ -12,6 +12,8 @@ add_library(llm_engine
   kernels/gemm_fp16.cu
   kernels/gemv_int8.cu
   kernels/gemm_int8.cu
+  kernels/gemv_int4.cu
+  kernels/gemm_int4.cu
   kernels/kv_cache_write.cu
   kernels/attention_qk.cu
   kernels/softmax.cu
@@ -122,6 +124,8 @@ if(LLM_BUILD_REFERENCE_TESTS)
     test_gemm_fp16:ref_gemm.llmbin
     test_gemv_int8:ref_gemv_int8.llmbin
     test_gemm_int8:ref_gemm_int8.llmbin
+    test_gemv_int4:ref_gemv_int4.llmbin
+    test_gemm_int4:ref_gemm_int4.llmbin
     test_attention:ref_attention.llmbin
     test_elementwise:ref_elementwise.llmbin
   )
@@ -133,7 +137,8 @@ if(LLM_BUILD_REFERENCE_TESTS)
     list(APPEND LLM_REF_OUTPUTS ${LLM_REF_DIR}/${fixture_file})
   endforeach()
   list(APPEND LLM_REF_OUTPUTS ${LLM_REF_DIR}/ref_model.llmbin ${LLM_REF_DIR}/ref_forward.llmbin
-                              ${LLM_REF_DIR}/ref_model_int8.llmbin ${LLM_REF_DIR}/ref_forward_int8.llmbin)
+                              ${LLM_REF_DIR}/ref_model_int8.llmbin ${LLM_REF_DIR}/ref_forward_int8.llmbin
+                              ${LLM_REF_DIR}/ref_model_int4.llmbin ${LLM_REF_DIR}/ref_forward_int4.llmbin)
 
   add_custom_command(
     OUTPUT ${LLM_REF_OUTPUTS}
@@ -171,10 +176,13 @@ if(LLM_BUILD_REFERENCE_TESTS)
            COMMAND test_forward ${LLM_REF_DIR}/ref_model.llmbin ${LLM_REF_DIR}/ref_forward.llmbin)
   set_tests_properties(test_forward PROPERTIES TIMEOUT 300)
 
-  # Same program on the INT8 copy of the model; the reference ran on its dequantized weights.
+  # Same program on the INT8/INT4 copies of the model; the reference ran on its dequantized weights.
   add_test(NAME test_forward_int8
            COMMAND test_forward ${LLM_REF_DIR}/ref_model_int8.llmbin ${LLM_REF_DIR}/ref_forward_int8.llmbin)
   set_tests_properties(test_forward_int8 PROPERTIES TIMEOUT 300)
+  add_test(NAME test_forward_int4
+           COMMAND test_forward ${LLM_REF_DIR}/ref_model_int4.llmbin ${LLM_REF_DIR}/ref_forward_int4.llmbin)
+  set_tests_properties(test_forward_int4 PROPERTIES TIMEOUT 300)
 
   # Needs no reference outputs -- it compares the engine against itself.
   add_executable(test_kv_cache tests/test_kv_cache.cu)
@@ -186,4 +194,6 @@ if(LLM_BUILD_REFERENCE_TESTS)
   set_tests_properties(test_kv_cache PROPERTIES TIMEOUT 300)
   add_test(NAME test_kv_cache_int8 COMMAND test_kv_cache ${LLM_REF_DIR}/ref_model_int8.llmbin)
   set_tests_properties(test_kv_cache_int8 PROPERTIES TIMEOUT 300)
+  add_test(NAME test_kv_cache_int4 COMMAND test_kv_cache ${LLM_REF_DIR}/ref_model_int4.llmbin)
+  set_tests_properties(test_kv_cache_int4 PROPERTIES TIMEOUT 300)
 endif()
