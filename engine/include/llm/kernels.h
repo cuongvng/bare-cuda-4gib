@@ -51,7 +51,7 @@ void launch_gemm_int8(const std::int8_t* weight, const __half* scales, const flo
 
 // INT4 versions: weight is [n_out, k_in / 2] bytes, two values per byte with even k in the
 // low nibble; scales and mins are FP16 [n_out, k_in / group_size], and w = q * scale + min.
-// Same requirements as INT8.
+// Same requirements as INT8; the GEMV also needs x 16-byte aligned.
 void launch_gemv_int4(const std::uint8_t* weight, const __half* scales, const __half* mins,
                       const float* x, float* y, int n_out, int k_in, int group_size,
                       void* stream = nullptr);

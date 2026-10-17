@@ -31,13 +31,16 @@ __global__ void gemv_int4_kernel(const std::uint8_t* __restrict__ weight,
   float acc = 0.0f;
   for (int k = lane * kPerLane; k < k_in; k += kPerWarpStep) {
     const std::uint32_t packed = w_row[k / kPerLane];
+    // x[k .. k+7] in two 16-byte loads; k is a multiple of 8, so both are aligned.
+    const float4 lo = *reinterpret_cast<const float4*>(x + k);
+    const float4 hi = *reinterpret_cast<const float4*>(x + k + 4);
+    const float xs[kPerLane] = {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
     // Nibble j of the little-endian word is weight k + j (even k in each byte's low nibble).
     float qx = 0.0f, sum_x = 0.0f;
 #pragma unroll
     for (int j = 0; j < kPerLane; ++j) {
-      const float xj = x[k + j];
-      qx += static_cast<float>((packed >> (4 * j)) & 0xFu) * xj;
-      sum_x += xj;
+      qx += static_cast<float>((packed >> (4 * j)) & 0xFu) * xs[j];
+      sum_x += xs[j];
     }
     // sum((q*s + m) * x) = s * sum(q*x) + m * sum(x); all 8 values share one group.
     const int g = k / group_size;
@@ -53,6 +56,10 @@ __global__ void gemv_int4_kernel(const std::uint8_t* __restrict__ weight,
 void launch_gemv_int4(const std::uint8_t* weight, const __half* scales, const __half* mins,
                       const float* x, float* y, int n_out, int k_in, int group_size, void* stream) {
   if (n_out == 0 || k_in == 0) return;
+  // The kernel reads x as float4.
+  if (reinterpret_cast<std::uintptr_t>(x) % alignof(float4) != 0) {
+    LLM_CUDA_CHECK(cudaErrorMisalignedAddress);
+  }
   const int grid = ceil_div(n_out, kWarpsPerBlock);
   gemv_int4_kernel<<<grid, kReduceBlockSize, 0, static_cast<cudaStream_t>(stream)>>>(
       weight, scales, mins, x, y, n_out, k_in, group_size);
