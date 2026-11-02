@@ -1,4 +1,5 @@
 add_library(llm_engine
+  src/allocator.cpp
   src/device_info.cu
   src/loader.cpp
   src/kv_cache.cpp
@@ -45,6 +46,7 @@ set(LLM_TESTS
   test_vector_add
   test_device_baseline
   test_kv_cache_write
+  test_allocator
 )
 
 foreach(test_name IN LISTS LLM_TESTS)
