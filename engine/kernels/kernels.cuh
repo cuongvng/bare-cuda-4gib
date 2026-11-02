@@ -14,6 +14,8 @@
 
 #include <cfloat>
 
+#include "llm/kernels.h"
+
 namespace llm {
 
 constexpr int kWarpSize = 32;
@@ -36,6 +38,16 @@ constexpr int ceil_div(int a, int b) { return (a + b - 1) / b; }
 inline int clamped_grid(int want) {
   if (want < 1) return 1;
   return want > kMaxGridSize ? kMaxGridSize : want;
+}
+
+// Start of this layer's rows in the page holding `token`; costs one page table read.
+__device__ __forceinline__ const float* kv_page_rows(const KVPages& pages, int token) {
+  const std::size_t page = pages.page_table[token >> pages.token_shift];
+  return pages.pool + page * pages.page_stride + pages.layer_offset;
+}
+
+__device__ __forceinline__ int kv_page_row(const KVPages& pages, int token) {
+  return token & ((1 << pages.token_shift) - 1);
 }
 
 // Weights are read straight out of their FP16 VRAM layout and widened in

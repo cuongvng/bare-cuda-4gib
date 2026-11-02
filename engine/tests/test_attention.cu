@@ -31,8 +31,16 @@ int main(int argc, char** argv) {
   d_scores.zero();
   d_out.zero();
 
-  llm::launch_attention_qk(d_q.as<float>(), d_k.as<float>(), d_scores.as<float>(), n_tokens,
-                           n_tokens, n_heads, n_kv_heads, head_dim, /*query_pos_offset=*/0);
+  llm::DeviceBuffer d_table = llm::make_device_buffer(std::vector<std::int32_t>{0});
+  llm::KVPages k_pages;
+  k_pages.pool = d_k.as<float>();
+  k_pages.page_table = d_table.as<std::int32_t>();
+  k_pages.token_shift = llm::kSinglePageShift;
+  llm::KVPages v_pages = k_pages;
+  v_pages.pool = d_v.as<float>();
+
+  llm::launch_attention_qk(d_q.as<float>(), k_pages, d_scores.as<float>(), n_tokens, n_tokens,
+                           n_heads, n_kv_heads, head_dim, /*query_pos_offset=*/0);
   LLM_CUDA_CHECK_LAUNCH();
   bool ok = check_close("attention_qk", download_fp32(d_scores, scores_expected.size()),
                         scores_expected, 1e-4f, 1e-4f);
@@ -42,8 +50,8 @@ int main(int argc, char** argv) {
   ok &= check_close("softmax", download_fp32(d_scores, probs_expected.size()), probs_expected,
                     1e-6f, 1e-5f);
 
-  llm::launch_attention_av(d_scores.as<float>(), d_v.as<float>(), d_out.as<float>(), n_tokens,
-                           n_tokens, n_heads, n_kv_heads, head_dim);
+  llm::launch_attention_av(d_scores.as<float>(), v_pages, d_out.as<float>(), n_tokens, n_tokens,
+                           n_heads, n_kv_heads, head_dim);
   LLM_CUDA_CHECK_LAUNCH();
   ok &= check_close("attention_av", download_fp32(d_out, out_expected.size()), out_expected, 1e-5f,
                     1e-5f);

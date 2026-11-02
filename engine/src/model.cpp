@@ -406,6 +406,8 @@ void Model::forward(const std::int32_t* host_ids, int n_tokens) {
          std::to_string(cache_.max_tokens()));
   }
 
+  cache_.reserve(n_tokens);
+
   std::vector<std::int32_t> positions(n_tokens);
   for (int i = 0; i < n_tokens; ++i) positions[i] = cache_len + i;
   act_.ids.upload(host_ids, static_cast<std::size_t>(n_tokens) * sizeof(std::int32_t));
@@ -442,8 +444,6 @@ void Model::forward(const std::int32_t* host_ids, int n_tokens) {
 
   for (std::size_t li = 0; li < layers_.size(); ++li) {
     const LayerWeights& layer = layers_[li];
-    float* k_cache = cache_.layer_k(static_cast<int>(li));
-    float* v_cache = cache_.layer_v(static_cast<int>(li));
 
     profile_begin_cost("rmsnorm", rmsnorm_cost(n_tokens, hidden));
     launch_rmsnorm(x, layer.attn_norm, normed, n_tokens, hidden, eps);
@@ -466,13 +466,13 @@ void Model::forward(const std::int32_t* host_ids, int n_tokens) {
     profile_end();
 
     profile_begin_cost("kv_write", kv_write_cost(n_tokens, kv_dim()));
-    launch_kv_cache_write(k, v, k_cache, v_cache, n_tokens, cache_len, kv_dim());
+    cache_.write(static_cast<int>(li), k, v, n_tokens);
     profile_end();
 
     // Attention reads KV cache
     profile_begin_cost("attn.qk", attention_qk_cost(n_tokens, n_keys, heads, kv_heads, head_dim));
-    launch_attention_qk(q, k_cache, scores, n_tokens, n_keys, heads, kv_heads, head_dim,
-                        cache_len);
+    launch_attention_qk(q, cache_.k_pages(static_cast<int>(li)), scores, n_tokens, n_keys, heads,
+                        kv_heads, head_dim, cache_len);
     profile_end();
 
     profile_begin_cost("attn.softmax", softmax_cost(heads * n_tokens, n_keys));
@@ -480,7 +480,8 @@ void Model::forward(const std::int32_t* host_ids, int n_tokens) {
     profile_end();
 
     profile_begin_cost("attn.av", attention_av_cost(n_tokens, n_keys, heads, kv_heads, head_dim));
-    launch_attention_av(scores, v_cache, attn_out, n_tokens, n_keys, heads, kv_heads, head_dim);
+    launch_attention_av(scores, cache_.v_pages(static_cast<int>(li)), attn_out, n_tokens, n_keys,
+                        heads, kv_heads, head_dim);
     profile_end();
 
     profile_begin_cost("gemm.wo", matmul_cost(layer.wo, n_tokens, hidden, q_dim()));

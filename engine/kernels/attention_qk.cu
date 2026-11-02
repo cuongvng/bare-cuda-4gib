@@ -14,7 +14,7 @@ namespace {
 //
 // One block per (head, query): head_dim floats of shared memory, one warp-shaped
 // walk over the keys.
-__global__ void attention_qk_kernel(const float* __restrict__ q, const float* __restrict__ k,
+__global__ void attention_qk_kernel(const float* __restrict__ q, const KVPages k,
                                     float* __restrict__ scores, int n_query, int n_keys,
                                     int n_heads, int n_kv_heads, int head_dim,
                                     int query_pos_offset) {
@@ -42,6 +42,8 @@ __global__ void attention_qk_kernel(const float* __restrict__ q, const float* __
   // the K reads are consecutive addresses within a row. One thread per key would
   // stride by n_kv_heads * head_dim and scatter every request -- and these are
   // the reads that become the KV-cache traffic.
+  int current_page = -1;
+  const float* page_rows = nullptr;
   for (int key = warp; key < n_keys; key += warps) {
     if (key > last_key) {
       // Masked entries are written, not skipped: softmax_rows reads the whole
@@ -50,7 +52,14 @@ __global__ void attention_qk_kernel(const float* __restrict__ q, const float* __
       continue;
     }
 
-    const float* k_vec = k + (static_cast<std::size_t>(key) * n_kv_heads + kv_head) * head_dim;
+    // The page table is read only when this warp walks onto a new page.
+    const int page = key >> k.token_shift;
+    if (page != current_page) {
+      page_rows = kv_page_rows(k, key);
+      current_page = page;
+    }
+
+    const float* k_vec = page_rows + (kv_page_row(k, key) * n_kv_heads + kv_head) * head_dim;
     float acc = 0.0f;
     for (int d = lane; d < head_dim; d += kWarpSize) acc += q_shared[d] * k_vec[d];
 
@@ -61,7 +70,7 @@ __global__ void attention_qk_kernel(const float* __restrict__ q, const float* __
 
 }  // namespace
 
-void launch_attention_qk(const float* q, const float* k, float* scores, int n_query, int n_keys,
+void launch_attention_qk(const float* q, const KVPages& k, float* scores, int n_query, int n_keys,
                          int n_heads, int n_kv_heads, int head_dim, int query_pos_offset,
                          void* stream) {
   if (n_query == 0 || n_keys == 0 || n_heads == 0) return;

@@ -47,6 +47,7 @@ set(LLM_TESTS
   test_device_baseline
   test_kv_cache_write
   test_allocator
+  test_kv_pages
 )
 
 foreach(test_name IN LISTS LLM_TESTS)

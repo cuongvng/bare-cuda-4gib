@@ -15,7 +15,7 @@ namespace {
 // across keys. Each thread walks V down the key axis; consecutive threads read
 // consecutive columns of the same V row, so the access is coalesced even though
 // the loop is over keys.
-__global__ void attention_av_kernel(const float* __restrict__ probs, const float* __restrict__ v,
+__global__ void attention_av_kernel(const float* __restrict__ probs, const KVPages v,
                                     float* __restrict__ out, int n_query, int n_keys, int n_heads,
                                     int n_kv_heads, int head_dim) {
   const int query = blockIdx.x;
@@ -31,9 +31,12 @@ __global__ void attention_av_kernel(const float* __restrict__ probs, const float
     // consecutive d, so each step of the loop is one coalesced read of a V row;
     // prob_row[j] is the same address for the whole block and broadcasts.
     float acc = 0.0f;
+    const float* page_rows = nullptr;
     for (int key = 0; key < n_keys; ++key) {
-      acc += prob_row[key] *
-             v[(static_cast<std::size_t>(key) * n_kv_heads + kv_head) * head_dim + d];
+      const int row = kv_page_row(v, key);
+      // Keys walk in order, so row 0 is the only place a new page can begin.
+      if (row == 0) page_rows = kv_page_rows(v, key);
+      acc += prob_row[key] * page_rows[(row * n_kv_heads + kv_head) * head_dim + d];
     }
     out_row[d] = acc;
   }
@@ -41,7 +44,7 @@ __global__ void attention_av_kernel(const float* __restrict__ probs, const float
 
 }  // namespace
 
-void launch_attention_av(const float* probs, const float* v, float* out, int n_query, int n_keys,
+void launch_attention_av(const float* probs, const KVPages& v, float* out, int n_query, int n_keys,
                          int n_heads, int n_kv_heads, int head_dim, void* stream) {
   if (n_query == 0 || n_keys == 0 || n_heads == 0) return;
   const dim3 grid(n_query, n_heads);

@@ -7,6 +7,19 @@
 
 namespace llm {
 
+// Finds one layer's K or V rows in a paged cache: token t is at row
+// t & (2^token_shift - 1) of page page_table[t >> token_shift].
+struct KVPages {
+  const float* pool = nullptr;
+  const std::int32_t* page_table = nullptr;
+  std::size_t page_stride = 0;   // floats from one page to the next
+  std::size_t layer_offset = 0;  // floats from a page's start to this layer's rows
+  int token_shift = 0;
+};
+
+// Puts every token in page 0, so one unbroken buffer can pose as a paged cache.
+constexpr int kSinglePageShift = 30;
+
 // Toolchain smoke test: c[i] = a[i] + b[i] over device pointers.
 void launch_vector_add(const float* d_a, const float* d_b, float* d_c, std::size_t n,
                        void* stream = nullptr);
@@ -61,7 +74,7 @@ void launch_gemm_int4(const std::uint8_t* weight, const __half* scales, const __
 
 // Appends `n_new` rows of freshly computed K and V into one layer's cache.
 // `new_k` and `new_v` are [n_new, kv_dim]; `k_cache` and `v_cache` are that
-// layer's [max_seq, kv_dim] slabs, and row i of the input lands at row
+// layer's [rows, kv_dim] slabs, and row i of the input lands at row
 // `start_pos + i`. The caller guarantees start_pos + n_new fits the slab.
 void launch_kv_cache_write(const float* new_k, const float* new_v, float* k_cache, float* v_cache,
                            int n_new, int start_pos, int kv_dim, void* stream = nullptr);
@@ -73,9 +86,9 @@ void launch_kv_cache_write(const float* new_k, const float* new_v, float* k_cach
 // kernel serves both.
 //
 // GQA: kv_head(h) = h / (n_heads / n_kv_heads).
-// q is [n_query, n_heads, head_dim], k is [n_keys, n_kv_heads, head_dim],
+// q is [n_query, n_heads, head_dim], k holds n_keys rows of [n_kv_heads, head_dim],
 // scores is [n_heads, n_query, n_keys].
-void launch_attention_qk(const float* q, const float* k, float* scores, int n_query, int n_keys,
+void launch_attention_qk(const float* q, const KVPages& k, float* scores, int n_query, int n_keys,
                          int n_heads, int n_kv_heads, int head_dim, int query_pos_offset,
                          void* stream = nullptr);
 
@@ -84,9 +97,9 @@ void launch_attention_qk(const float* q, const float* k, float* scores, int n_qu
 void launch_softmax_rows(float* x, int n_rows, int row_len, void* stream = nullptr);
 
 // out[i, h, :] = sum_j probs[h, i, j] * v[j, kv_head(h), :].
-// probs is [n_heads, n_query, n_keys], v is [n_keys, n_kv_heads, head_dim],
+// probs is [n_heads, n_query, n_keys], v holds n_keys rows of [n_kv_heads, head_dim],
 // out is [n_query, n_heads, head_dim].
-void launch_attention_av(const float* probs, const float* v, float* out, int n_query, int n_keys,
+void launch_attention_av(const float* probs, const KVPages& v, float* out, int n_query, int n_keys,
                          int n_heads, int n_kv_heads, int head_dim, void* stream = nullptr);
 
 // out[i] = silu(gate[i]) * up[i], where silu(z) = z * sigmoid(z).
