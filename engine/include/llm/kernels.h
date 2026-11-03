@@ -119,4 +119,8 @@ void launch_residual_add(float* x, const float* y, std::size_t n, void* stream =
 // approximate).
 void launch_argmax(const float* logits, std::int32_t* out_index, int n, void* stream = nullptr);
 
+// out_indices[r] = argmax of row r of [n_rows, n] logits, same tie rule, one launch.
+void launch_argmax_rows(const float* logits, std::int32_t* out_indices, int n_rows, int n,
+                        void* stream = nullptr);
+
 }  // namespace llm

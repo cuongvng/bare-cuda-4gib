@@ -56,7 +56,7 @@ struct Activations {
   DeviceBuffer up;         // float  [max_tokens, intermediate]
   DeviceBuffer act;        // float  [max_tokens, intermediate]  swiglu output
   DeviceBuffer logits;     // float  [max_tokens, vocab]
-  DeviceBuffer next_token; // int32  [1]
+  DeviceBuffer next_token; // int32  [max_tokens]               argmax of each logits row
 
   void allocate(const ModelConfig& config, int max_tokens);
   std::size_t total_bytes() const;
@@ -90,6 +90,9 @@ class Model {
   std::vector<float> logits_host(int n_tokens);
 
   std::int32_t argmax_last(int n_tokens);
+
+  // Next token of each of the first n_rows logits rows, e.g. one per sequence after forward_decode.
+  std::vector<std::int32_t> argmax_rows(int n_rows);
 
   // Called once per generated token, as soon as its id is on the host. `step` is
   // 0 for the first token. 

@@ -13,26 +13,27 @@ namespace {
 // to find the winning index. The LM head projection itself is an ordinary GEMV
 // (gemv_fp16) -- this file is only the reduction that follows it.
 //
-// A single block: the vector is one row of ~32K floats, a fraction of a
-// millisecond of streaming, and one block avoids a second kernel launch to
-// combine per-block winners. Copying the whole logits vector back to the host
-// to argmax it there would cost more in PCIe transfer than the reduction saves.
+// One block per row: a row is ~32K floats, a fraction of a millisecond of
+// streaming, and one block avoids a second kernel launch to combine per-block
+// winners. A batch of rows is one launch. Copying the logits back to the host
+// to argmax them there would cost more in PCIe transfer than the reduction saves.
 constexpr int kArgmaxBlockSize = 256;
 
-__global__ void argmax_kernel(const float* __restrict__ logits, std::int32_t* __restrict__ out,
-                              int n) {
+__global__ void argmax_kernel(const float* __restrict__ logits_rows,
+                              std::int32_t* __restrict__ out_rows, int n) {
   // The reduction carries the index alongside the value, which is why it is
   // written out by hand instead of calling block_reduce_max().
   __shared__ float best_value[kArgmaxBlockSize];
   __shared__ std::int32_t best_index[kArgmaxBlockSize];
+
+  const float* logits = logits_rows + static_cast<std::size_t>(blockIdx.x) * n;
 
   float value = -FLT_MAX;
   // `n` as the empty marker, not 0: it loses every tie against a real index, so
   // a thread that gets no elements can never win one.
   std::int32_t index = n;
 
-  const int stride = blockDim.x * gridDim.x;
-  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
+  for (int i = threadIdx.x; i < n; i += blockDim.x) {
     const float v = logits[i];
     if (v > value) {
       value = v;
@@ -60,14 +61,20 @@ __global__ void argmax_kernel(const float* __restrict__ logits, std::int32_t* __
     __syncthreads();
   }
 
-  if (threadIdx.x == 0) *out = best_index[0] < n ? best_index[0] : 0;
+  if (threadIdx.x == 0) out_rows[blockIdx.x] = best_index[0] < n ? best_index[0] : 0;
 }
 
 }  // namespace
 
 void launch_argmax(const float* logits, std::int32_t* out_index, int n, void* stream) {
-  if (n == 0) return;
-  argmax_kernel<<<1, kArgmaxBlockSize, 0, static_cast<cudaStream_t>(stream)>>>(logits, out_index, n);
+  launch_argmax_rows(logits, out_index, 1, n, stream);
+}
+
+void launch_argmax_rows(const float* logits, std::int32_t* out_indices, int n_rows, int n,
+                        void* stream) {
+  if (n_rows == 0 || n == 0) return;
+  argmax_kernel<<<n_rows, kArgmaxBlockSize, 0, static_cast<cudaStream_t>(stream)>>>(
+      logits, out_indices, n);
   LLM_CUDA_CHECK(cudaGetLastError());
 }
 

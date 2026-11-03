@@ -260,7 +260,7 @@ void Activations::allocate(const ModelConfig& config, int tokens) {
   up.allocate(t * inter * sizeof(float));
   act.allocate(t * inter * sizeof(float));
   logits.allocate(t * config.vocab_size * sizeof(float));
-  next_token.allocate(sizeof(std::int32_t));
+  next_token.allocate(t * sizeof(std::int32_t));
 }
 
 std::size_t Activations::total_bytes() const {
@@ -590,6 +590,21 @@ std::int32_t Model::argmax_last(int n_tokens) {
   LLM_CUDA_CHECK(cudaDeviceSynchronize());
   act_.next_token.download(&token, sizeof(token));
   return token;
+}
+
+std::vector<std::int32_t> Model::argmax_rows(int n_rows) {
+  if (n_rows <= 0 || n_rows > act_.max_tokens) {
+    fail("argmax_rows called with " + std::to_string(n_rows) + " rows, workspace holds " +
+         std::to_string(act_.max_tokens));
+  }
+  const int vocab = static_cast<int>(config_.vocab_size);
+  profile_begin_cost("argmax", argmax_cost(n_rows * vocab));
+  launch_argmax_rows(act_.logits.as<float>(), act_.next_token.as<std::int32_t>(), n_rows, vocab);
+  profile_end();
+  std::vector<std::int32_t> tokens(n_rows);
+  LLM_CUDA_CHECK(cudaDeviceSynchronize());
+  act_.next_token.download(tokens.data(), tokens.size() * sizeof(std::int32_t));
+  return tokens;
 }
 
 std::vector<std::int32_t> Model::generate(const std::vector<std::int32_t>& prompt,

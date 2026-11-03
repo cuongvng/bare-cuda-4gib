@@ -64,9 +64,15 @@ int main(int argc, char** argv) {
   }
   for (int step = 1; step < kSteps; ++step) {
     model.forward_decode(next.data(), kSlots.data(), n_seqs);
+    next = model.argmax_rows(n_seqs);
+    // The device's per-row winners must match a host argmax over the same logits.
     const std::vector<float> logits = model.logits_host(n_seqs);
     for (int b = 0; b < n_seqs; ++b) {
-      next[b] = argmax_row(logits, b, vocab);
+      if (next[b] != argmax_row(logits, b, vocab)) {
+        std::fprintf(stderr, "FAIL step %d row %d: device argmax %d, host argmax %d\n", step, b,
+                     next[b], argmax_row(logits, b, vocab));
+        return EXIT_FAILURE;
+      }
       together[b].push_back(next[b]);
     }
   }

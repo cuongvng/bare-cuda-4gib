@@ -1,5 +1,6 @@
 // The three small kernels that don't warrant a file each: SwiGLU, the residual
 // add, and the greedy-sampling argmax.
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 
@@ -47,6 +48,20 @@ int main(int argc, char** argv) {
     std::int32_t got = -1;
     d_index.download(&got, sizeof(got));
     ok &= check_int_equal("argmax", {got}, expected);
+
+    // Several rows in one launch: the reference row, a tie, and a max in the last slot.
+    const int n = static_cast<int>(logits.size());
+    std::vector<float> rows(3 * static_cast<std::size_t>(n), 0.0f);
+    std::copy(logits.begin(), logits.end(), rows.begin());
+    rows[n + 7] = rows[n + n / 2] = 1.0f;
+    rows[3 * static_cast<std::size_t>(n) - 1] = 1.0f;
+    llm::DeviceBuffer d_rows = llm::make_device_buffer(rows);
+    llm::DeviceBuffer d_indices(3 * sizeof(std::int32_t));
+    llm::launch_argmax_rows(d_rows.as<float>(), d_indices.as<std::int32_t>(), 3, n);
+    LLM_CUDA_CHECK_LAUNCH();
+    std::vector<std::int32_t> got_rows(3);
+    d_indices.download(got_rows.data(), got_rows.size() * sizeof(std::int32_t));
+    ok &= check_int_equal("argmax_rows", got_rows, {expected[0], 7, n - 1});
   }
 
   if (!ok) return EXIT_FAILURE;
