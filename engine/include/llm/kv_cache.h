@@ -19,7 +19,11 @@ constexpr int kKVTokensPerPage = 1 << kKVTokenShift;
 // Each sequence lives in a slot with its own page list, length and row of the page table.
 class KVCache {
  public:
-  void allocate(const ModelConfig& config, int max_tokens, int max_seqs = 1);
+  // num_pages sizes the shared pool; 0 gives every slot room for max_tokens.
+  void allocate(const ModelConfig& config, int max_tokens, int max_seqs = 1, int num_pages = 0);
+
+  // Pages a sequence holds once it has cached n_tokens.
+  static int pages_for(int n_tokens) { return (n_tokens + kKVTokensPerPage - 1) / kKVTokensPerPage; }
 
   // Makes sure the slot's next n_new tokens have pages; call before writing them.
   void reserve(int slot, int n_new);

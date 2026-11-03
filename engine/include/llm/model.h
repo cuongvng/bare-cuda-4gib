@@ -65,7 +65,8 @@ struct Activations {
 class Model {
  public:
   // max_tokens bounds each sequence; max_seqs is how many sequences the cache holds at once.
-  static Model load(const std::string& path, int max_tokens, int max_seqs = 1);
+  // kv_pages sizes the shared page pool; 0 gives every sequence room for max_tokens.
+  static Model load(const std::string& path, int max_tokens, int max_seqs = 1, int kv_pages = 0);
 
   const ModelConfig& config() const { return config_; }
   std::size_t weight_bytes() const { return weights_.bytes(); }
@@ -100,6 +101,15 @@ class Model {
 
   std::vector<std::int32_t> generate(const std::vector<std::int32_t>& prompt, int max_new_tokens,
                                      const TokenCallback& on_token = nullptr);
+
+  // Like TokenCallback, with `seq` indexing the prompts passed to generate_batch.
+  using BatchTokenCallback = std::function<void(int seq, int step, std::int32_t token)>;
+
+  // Greedy-decodes every prompt, decoding up to max_seqs of them together. A prompt waits, in
+  // order, until a slot and the pages for its whole run are free. Returns ids per prompt.
+  std::vector<std::vector<std::int32_t>> generate_batch(
+      const std::vector<std::vector<std::int32_t>>& prompts, int max_new_tokens,
+      const BatchTokenCallback& on_token = nullptr);
 
  private:
   ModelConfig config_;

@@ -19,22 +19,24 @@ std::size_t KVCache::layer_floats() const {
   return static_cast<std::size_t>(kKVTokensPerPage) * kv_dim_;
 }
 
-void KVCache::allocate(const ModelConfig& config, int max_tokens, int max_seqs) {
+void KVCache::allocate(const ModelConfig& config, int max_tokens, int max_seqs, int num_pages) {
   if (max_tokens <= 0) fail("max_tokens must be positive");
   if (max_seqs <= 0) fail("max_seqs must be positive");
+  if (num_pages < 0) fail("num_pages must not be negative");
 
   max_tokens_ = max_tokens;
-  max_pages_per_seq_ = (max_tokens + kKVTokensPerPage - 1) / kKVTokensPerPage;
+  max_pages_per_seq_ = pages_for(max_tokens);
   num_layers_ = static_cast<int>(config.num_layers);
   kv_dim_ = static_cast<int>(config.num_kv_heads * config.head_dim);
 
-  // Enough for every slot to reach max_tokens at once.
-  const int num_pages = max_seqs * max_pages_per_seq_;
+  // 0 means enough for every slot to reach max_tokens at once.
+  const int table_entries = max_seqs * max_pages_per_seq_;
+  if (num_pages == 0) num_pages = table_entries;
   const std::size_t page_floats = 2 * static_cast<std::size_t>(num_layers_) * layer_floats();
   pool_.allocate(page_floats * sizeof(float), num_pages);
 
   slots_.assign(max_seqs, Slot{});
-  page_table_.allocate(static_cast<std::size_t>(num_pages) * sizeof(std::int32_t));
+  page_table_.allocate(static_cast<std::size_t>(table_entries) * sizeof(std::int32_t));
 }
 
 const KVCache::Slot& KVCache::slot_at(int slot) const {
@@ -53,7 +55,7 @@ void KVCache::reserve(int slot, int n_new) {
   if (n_new < 0) fail("reserve called with a negative count");
   Slot& s = slot_at(slot);
 
-  const int needed = (s.length + n_new + kKVTokensPerPage - 1) / kKVTokensPerPage;
+  const int needed = pages_for(s.length + n_new);
   if (needed > max_pages_per_seq_) {
     fail("slot " + std::to_string(slot) + " needs " + std::to_string(needed) +
          " pages, its table row holds " + std::to_string(max_pages_per_seq_));

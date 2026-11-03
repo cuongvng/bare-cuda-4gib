@@ -1,8 +1,10 @@
 // Several sequences decoded together must produce the same ids as each decoded alone.
 // Slots are out of order and one stays empty, so a row only finds its cache through row_slot.
+// Then generate_batch queues more prompts than fit, under a slot limit and a page limit.
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -21,10 +23,71 @@ const std::vector<std::vector<std::int32_t>> kPrompts = {
     {60, 2, 33, 71, 5, 14, 27, 40, 11},
 };
 
+const std::vector<std::vector<std::int32_t>> kQueuePrompts = {
+    {3, 17, 42, 8, 55}, {9, 1}, {60, 2, 33, 71, 5, 14, 27, 40, 11}, {44, 7, 19}, {12, 30, 8, 2},
+};
+
+struct QueueCase {
+  const char* name;
+  int max_seqs;
+  int kv_pages;   // 0: room for every slot
+  int max_live;   // sequences decoding at once, at most and at some point
+};
+
+// Each prompt here needs one page, so two pages admit two sequences while three slots admit three.
+constexpr QueueCase kQueueCases[] = {
+    {"page-limited", 3, 2, 2},
+    {"slot-limited", 3, 0, 3},
+};
+
 // Lowest index on ties, like the device argmax.
 std::int32_t argmax_row(const std::vector<float>& logits, int row, std::size_t vocab) {
   const auto first = logits.begin() + row * vocab;
   return static_cast<std::int32_t>(std::max_element(first, first + vocab) - first);
+}
+
+bool check_generate_batch(const char* path, const QueueCase& c, int max_tokens,
+                          const std::vector<std::vector<std::int32_t>>& prompts,
+                          const std::vector<std::vector<std::int32_t>>& alone) {
+  llm::Model model = llm::Model::load(path, max_tokens, c.max_seqs, c.kv_pages);
+  model.shuffle_cache_pages(9);
+
+  // Live from a sequence's first token to its last; started records admission order.
+  std::set<int> live;
+  std::vector<int> started;
+  int max_live = 0;
+  const auto results = model.generate_batch(prompts, kSteps, [&](int seq, int step, std::int32_t) {
+    if (step == 0) {
+      live.insert(seq);
+      started.push_back(seq);
+      max_live = std::max(max_live, static_cast<int>(live.size()));
+    }
+    if (step == kSteps - 1) live.erase(seq);
+  });
+  LLM_CUDA_CHECK_LAUNCH();
+
+  bool ok = true;
+  for (std::size_t p = 0; p < prompts.size(); ++p) {
+    const std::string label = std::string(c.name) + " prompt " + std::to_string(p);
+    ok &= llm::testing::check_int_equal(label.c_str(), results[p], alone[p]);
+  }
+  if (max_live != c.max_live) {
+    std::fprintf(stderr, "FAIL %s: %d sequences decoded at once, expected %d\n", c.name, max_live,
+                 c.max_live);
+    ok = false;
+  }
+  if (!std::is_sorted(started.begin(), started.end()) || started.size() != prompts.size()) {
+    std::fprintf(stderr, "FAIL %s: prompts were not admitted in order\n", c.name);
+    ok = false;
+  }
+  if (model.cache().pool().free_pages() != model.cache().pool().num_pages()) {
+    std::fprintf(stderr, "FAIL %s: %d pages still held after every sequence finished\n", c.name,
+                 model.cache().pool().pages_in_use());
+    ok = false;
+  }
+  std::printf("%s: %zu prompts, at most %d decoding at once over a %d-page pool\n", c.name,
+              prompts.size(), max_live, model.cache().pool().num_pages());
+  return ok;
 }
 
 }  // namespace
@@ -100,8 +163,19 @@ int main(int argc, char** argv) {
     ok = false;
   }
 
+  std::vector<std::vector<std::int32_t>> queue_prompts = kQueuePrompts;
+  std::vector<std::vector<std::int32_t>> queue_alone;
+  for (auto& p : queue_prompts) {
+    for (std::int32_t& id : p) id %= static_cast<std::int32_t>(vocab);
+    queue_alone.push_back(model.generate(p, kSteps));
+  }
+  for (const QueueCase& c : kQueueCases) {
+    ok &= check_generate_batch(argv[1], c, model.max_tokens(), queue_prompts, queue_alone);
+  }
+
   if (!ok) return EXIT_FAILURE;
-  std::printf("PASS: %d sequences decoded together for %d steps match each decoded alone\n",
+  std::printf("PASS: %d sequences decoded together for %d steps match each decoded alone, and "
+              "generate_batch matches under slot and page limits\n",
               n_seqs, kSteps);
   return EXIT_SUCCESS;
 }

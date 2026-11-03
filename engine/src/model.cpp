@@ -269,7 +269,7 @@ std::size_t Activations::total_bytes() const {
          act.bytes() + logits.bytes() + next_token.bytes();
 }
 
-Model Model::load(const std::string& path, int max_tokens, int max_seqs) {
+Model Model::load(const std::string& path, int max_tokens, int max_seqs, int kv_pages) {
   const ModelFile file = ModelFile::load(path);
   const ModelConfig& c = file.config();
 
@@ -390,7 +390,7 @@ Model Model::load(const std::string& path, int max_tokens, int max_seqs) {
          std::to_string(c.max_seq_len));
   }
   model.act_.allocate(c, max_tokens);
-  model.cache_.allocate(c, max_tokens, max_seqs);
+  model.cache_.allocate(c, max_tokens, max_seqs, kv_pages);
 
   return model;
 }
@@ -629,6 +629,98 @@ std::vector<std::int32_t> Model::generate(const std::vector<std::int32_t>& promp
       forward(&next, 1);
       last_forward_tokens = 1;
     }
+  }
+  return generated;
+}
+
+std::vector<std::vector<std::int32_t>> Model::generate_batch(
+    const std::vector<std::vector<std::int32_t>>& prompts, int max_new_tokens,
+    const BatchTokenCallback& on_token) {
+  const int n_prompts = static_cast<int>(prompts.size());
+  std::vector<std::vector<std::int32_t>> generated(n_prompts);
+  if (max_new_tokens <= 0) return generated;
+
+  // Like generate(), a sequence stops early at max_tokens; its last token is never cached.
+  std::vector<int> target(n_prompts);
+  std::vector<int> pages_needed(n_prompts);
+  for (int p = 0; p < n_prompts; ++p) {
+    const int len = static_cast<int>(prompts[p].size());
+    if (len == 0) fail("generate_batch given an empty prompt at index " + std::to_string(p));
+    if (len > act_.max_tokens) {
+      fail("prompt " + std::to_string(p) + " has " + std::to_string(len) +
+           " tokens, workspace holds " + std::to_string(act_.max_tokens));
+    }
+    target[p] = std::min(max_new_tokens, act_.max_tokens - len + 1);
+    pages_needed[p] = KVCache::pages_for(len + target[p] - 1);
+    if (pages_needed[p] > cache_.pool().num_pages()) {
+      fail("prompt " + std::to_string(p) + " needs " + std::to_string(pages_needed[p]) +
+           " pages, the pool holds " + std::to_string(cache_.pool().num_pages()));
+    }
+  }
+
+  struct Active {
+    int seq, slot;
+    std::int32_t last;
+  };
+  std::vector<Active> active;
+  std::vector<int> free_slots;
+  for (int s = max_seqs() - 1; s >= 0; --s) free_slots.push_back(s);
+  // Pages promised to admitted sequences, held or still to be taken as they grow.
+  int committed_pages = 0;
+  int next_prompt = 0;
+
+  reset_cache();
+  auto emit = [&](int seq, std::int32_t token) {
+    generated[seq].push_back(token);
+    if (on_token) on_token(seq, static_cast<int>(generated[seq].size()) - 1, token);
+  };
+  auto retire = [&](const Active& a) {
+    cache_.reset(a.slot);
+    free_slots.push_back(a.slot);
+    committed_pages -= pages_needed[a.seq];
+  };
+
+  while (next_prompt < n_prompts || !active.empty()) {
+    // Admit in order; a prompt that does not fit yet blocks the ones behind it.
+    while (next_prompt < n_prompts && !free_slots.empty() &&
+           committed_pages + pages_needed[next_prompt] <= cache_.pool().num_pages()) {
+      const int seq = next_prompt++;
+      const Active a{seq, free_slots.back(), 0};
+      free_slots.pop_back();
+      committed_pages += pages_needed[seq];
+
+      const int len = static_cast<int>(prompts[seq].size());
+      forward(prompts[seq].data(), len, a.slot);
+      emit(seq, argmax_last(len));
+      if (static_cast<int>(generated[seq].size()) == target[seq]) {
+        retire(a);
+      } else {
+        active.push_back({seq, a.slot, generated[seq].back()});
+      }
+    }
+    if (active.empty()) continue;
+
+    std::vector<std::int32_t> ids;
+    std::vector<int> slots;
+    for (const Active& a : active) {
+      ids.push_back(a.last);
+      slots.push_back(a.slot);
+    }
+    forward_decode(ids.data(), slots.data(), static_cast<int>(active.size()));
+    const std::vector<std::int32_t> next = argmax_rows(static_cast<int>(active.size()));
+
+    std::vector<Active> still_active;
+    for (std::size_t b = 0; b < active.size(); ++b) {
+      Active a = active[b];
+      emit(a.seq, next[b]);
+      a.last = next[b];
+      if (static_cast<int>(generated[a.seq].size()) == target[a.seq]) {
+        retire(a);
+      } else {
+        still_active.push_back(a);
+      }
+    }
+    active = std::move(still_active);
   }
   return generated;
 }
