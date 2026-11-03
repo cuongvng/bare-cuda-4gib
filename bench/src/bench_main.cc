@@ -273,9 +273,12 @@ int main(int argc, char** argv) {
               prompt_tokens, tokens, warmup, runs);
   std::printf("load       %.0f ms (disk read + VRAM upload, excluded below)\n", load_ms);
   std::printf("vram       %.1f MiB measured by cudaMemGetInfo | %.1f weights + %.1f workspace + "
-              "%.1f kv cache accounted\n\n",
+              "%.1f kv cache accounted\n",
               (free_before - free_after) / mib, model.weight_bytes() / mib,
               model.workspace_bytes() / mib, model.cache_bytes() / mib);
+  std::printf("kv pool    %d pages of %d tokens | max batch %d at %d tokens per sequence\n\n",
+              model.kv_pages(), llm::kKVTokensPerPage, model.max_batch_size(),
+              model.max_tokens());
 
   for (int i = 0; i < warmup; ++i) run_request(model, prompt, tokens);
 

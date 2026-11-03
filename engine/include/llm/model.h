@@ -2,6 +2,7 @@
 
 #include <cuda_fp16.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -13,6 +14,9 @@
 #include "llm/loader.h"
 
 namespace llm {
+
+// Free VRAM an auto-sized KV pool leaves untouched: other processes and the display share the GPU.
+constexpr std::size_t kKVHeadroomBytes = std::size_t{256} << 20;
 
 // A matmul weight [N, K] in any stored format; scales/mins are [N, K / group_size]
 struct QuantWeight {
@@ -65,7 +69,7 @@ struct Activations {
 class Model {
  public:
   // max_tokens bounds each sequence; max_seqs is how many sequences the cache holds at once.
-  // kv_pages sizes the shared page pool; 0 gives every sequence room for max_tokens.
+  // kv_pages sizes the shared page pool; 0 fits it to free VRAM, capped at what the slots can use.
   static Model load(const std::string& path, int max_tokens, int max_seqs = 1, int kv_pages = 0);
 
   const ModelConfig& config() const { return config_; }
@@ -74,6 +78,12 @@ class Model {
   std::size_t cache_bytes() const { return cache_.bytes(); }
   int max_tokens() const { return act_.max_tokens; }
   int max_seqs() const { return cache_.max_seqs(); }
+  int kv_pages() const { return cache_.pool().num_pages(); }
+
+  // Sequences of max_tokens that can decode at once: limited by slots or by pages.
+  int max_batch_size() const {
+    return std::min(max_seqs(), kv_pages() / cache_.max_pages_per_seq());
+  }
 
   // Runs n_tokens of one sequence, appending them to that sequence's cache slot.
   void forward(const std::int32_t* host_ids, int n_tokens, int slot = 0);

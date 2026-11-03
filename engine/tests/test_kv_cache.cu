@@ -114,6 +114,43 @@ bool check_slots(const llm::ModelConfig& config) {
   return ok;
 }
 
+// Asking for more slots than VRAM holds must shrink the pool to fit, leaving the headroom free.
+bool check_pool_fits_vram(const char* path, const llm::Model& small) {
+  bool ok = true;
+  // Default sizing on a small request: room for every slot, as before.
+  if (small.kv_pages() != small.max_seqs() * small.cache().max_pages_per_seq()) {
+    std::fprintf(stderr, "FAIL small load got %d pages, expected room for every slot\n",
+                 small.kv_pages());
+    ok = false;
+  }
+
+  // One page per sequence, and one more sequence than free VRAM could ever hold.
+  const std::size_t page_bytes = llm::KVCache::page_bytes(small.config());
+  const int max_seqs = static_cast<int>(free_vram() / page_bytes) + 1;
+  llm::Model big = llm::Model::load(path, llm::kKVTokensPerPage, max_seqs);
+  const std::size_t left = free_vram();
+
+  std::printf("vram fit: asked for %d sequences, pool holds %d pages (%.1f MiB), %.1f MiB left "
+              "free, max batch %d\n",
+              max_seqs, big.kv_pages(), big.cache_bytes() / double(kMiB), left / double(kMiB),
+              big.max_batch_size());
+  if (big.kv_pages() >= max_seqs) {
+    std::fprintf(stderr, "FAIL pool was not shrunk to fit free VRAM\n");
+    ok = false;
+  }
+  if (left + kVramToleranceBytes < llm::kKVHeadroomBytes) {
+    std::fprintf(stderr, "FAIL only %.1f MiB left free, headroom is %.1f MiB\n",
+                 left / double(kMiB), llm::kKVHeadroomBytes / double(kMiB));
+    ok = false;
+  }
+  if (big.max_batch_size() != big.kv_pages()) {
+    std::fprintf(stderr, "FAIL max batch %d, pool holds %d one-page sequences\n",
+                 big.max_batch_size(), big.kv_pages());
+    ok = false;
+  }
+  return ok;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -180,6 +217,7 @@ int main(int argc, char** argv) {
   ok &= check_close("final logits", cached_row, cacheless_row, 1e-5f, 1e-5f);
   ok &= check_cache_vram(model.config());
   ok &= check_slots(model.config());
+  ok &= check_pool_fits_vram(argv[1], model);
 
   if (!ok) return EXIT_FAILURE;
   std::printf("PASS: %d incremental decode steps over scattered pages match a cacheless pass exactly\n",

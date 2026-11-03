@@ -234,6 +234,27 @@ void profile_begin_cost(const char* name, const Cost& c) {
   profile_begin(name, c.flops, c.ideal, c.moved, c.dram);
 }
 
+// Pages for every slot to reach max_tokens, or as many as fit in free VRAM beside kKVHeadroomBytes.
+int fit_kv_pages(const ModelConfig& c, int max_tokens, int max_seqs) {
+  const int per_seq = KVCache::pages_for(max_tokens);
+  const std::size_t wanted = static_cast<std::size_t>(per_seq) * max_seqs;
+  const std::size_t table_bytes = wanted * sizeof(std::int32_t);
+
+  std::size_t free_bytes = 0;
+  std::size_t total_bytes = 0;
+  LLM_CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+  const std::size_t reserved = kKVHeadroomBytes + table_bytes;
+  const std::size_t usable = free_bytes > reserved ? free_bytes - reserved : 0;
+  const std::size_t fit = usable / KVCache::page_bytes(c);
+
+  if (fit < static_cast<std::size_t>(per_seq)) {
+    fail("only " + std::to_string(fit) + " KV pages fit in " + std::to_string(free_bytes >> 20) +
+         " MiB free VRAM, one sequence of " + std::to_string(max_tokens) + " tokens needs " +
+         std::to_string(per_seq));
+  }
+  return static_cast<int>(std::min(wanted, fit));
+}
+
 }  // namespace
 
 void Activations::allocate(const ModelConfig& config, int tokens) {
@@ -390,6 +411,8 @@ Model Model::load(const std::string& path, int max_tokens, int max_seqs, int kv_
          std::to_string(c.max_seq_len));
   }
   model.act_.allocate(c, max_tokens);
+  if (max_seqs <= 0) fail("max_seqs must be positive");
+  if (kv_pages == 0) kv_pages = fit_kv_pages(c, max_tokens, max_seqs);
   model.cache_.allocate(c, max_tokens, max_seqs, kv_pages);
 
   return model;

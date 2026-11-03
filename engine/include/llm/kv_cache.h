@@ -25,6 +25,12 @@ class KVCache {
   // Pages a sequence holds once it has cached n_tokens.
   static int pages_for(int n_tokens) { return (n_tokens + kKVTokensPerPage - 1) / kKVTokensPerPage; }
 
+  // Bytes of one page: K and V for every layer, for kKVTokensPerPage tokens.
+  static std::size_t page_bytes(const ModelConfig& config) {
+    return 2 * static_cast<std::size_t>(config.num_layers) * kKVTokensPerPage *
+           config.num_kv_heads * config.head_dim * sizeof(float);
+  }
+
   // Makes sure the slot's next n_new tokens have pages; call before writing them.
   void reserve(int slot, int n_new);
 

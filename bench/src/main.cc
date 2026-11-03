@@ -79,10 +79,10 @@ int main(int argc, char** argv) {
   llm::Model model = llm::Model::load(model_path, max_seq);
   std::printf(
       "[llm] %u layers, hidden %u, vocab %u | weights %.1f MiB, workspace %.1f MiB, cache %.1f "
-      "MiB\n",
+      "MiB (%d pages, max batch %d)\n",
       model.config().num_layers, model.config().hidden_size, model.config().vocab_size,
       model.weight_bytes() / (1024.0 * 1024.0), model.workspace_bytes() / (1024.0 * 1024.0),
-      model.cache_bytes() / (1024.0 * 1024.0));
+      model.cache_bytes() / (1024.0 * 1024.0), model.kv_pages(), model.max_batch_size());
 
   const std::vector<std::int32_t> generated = model.generate(prompt, new_tokens);
 

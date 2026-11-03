@@ -32,8 +32,7 @@ void KVCache::allocate(const ModelConfig& config, int max_tokens, int max_seqs, 
   // 0 means enough for every slot to reach max_tokens at once.
   const int table_entries = max_seqs * max_pages_per_seq_;
   if (num_pages == 0) num_pages = table_entries;
-  const std::size_t page_floats = 2 * static_cast<std::size_t>(num_layers_) * layer_floats();
-  pool_.allocate(page_floats * sizeof(float), num_pages);
+  pool_.allocate(page_bytes(config), num_pages);
 
   slots_.assign(max_seqs, Slot{});
   page_table_.allocate(static_cast<std::size_t>(table_entries) * sizeof(std::int32_t));
