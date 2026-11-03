@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 #include "llm/device_buffer.h"
@@ -17,6 +18,9 @@ class PagePool {
 
   // Returns false for an invalid id or a page that is already free.
   [[nodiscard]] bool release(int page);
+
+  // Reorders the free pages so later acquires come out scattered; used by tests.
+  void shuffle_free_list(std::uint32_t seed);
 
   float* page_data(int page);
   const float* page_data(int page) const;

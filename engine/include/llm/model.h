@@ -75,6 +75,9 @@ class Model {
 
   void reset_cache() { cache_.reset(); }
 
+  const KVCache& cache() const { return cache_; }
+  void shuffle_cache_pages(std::uint32_t seed) { cache_.shuffle_free_pages(seed); }
+
   // Copies the logits of the last forward pass back to the host.
   std::vector<float> logits_host(int n_tokens);
 

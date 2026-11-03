@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <random>
 #include <string>
 
 namespace llm {
@@ -45,6 +46,11 @@ bool PagePool::release(int page) {
   in_use_[page] = 0;
   free_list_.push_back(page);
   return true;
+}
+
+void PagePool::shuffle_free_list(std::uint32_t seed) {
+  std::mt19937 rng(seed);
+  std::shuffle(free_list_.begin(), free_list_.end(), rng);
 }
 
 float* PagePool::page_data(int page) {

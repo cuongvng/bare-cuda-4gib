@@ -41,6 +41,10 @@ class KVCache {
   std::size_t bytes() const { return pool_.total_bytes() + page_table_.bytes(); }
   const PagePool& pool() const { return pool_; }
 
+  // Page ids in token order; scattered once shuffle_free_pages has run.
+  const std::vector<std::int32_t>& page_ids() const { return pages_; }
+  void shuffle_free_pages(std::uint32_t seed) { pool_.shuffle_free_list(seed); }
+
  private:
   std::size_t layer_floats() const;
   KVPages pages_at(int layer) const;
