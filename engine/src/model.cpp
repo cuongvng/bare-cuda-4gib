@@ -267,7 +267,7 @@ std::size_t Activations::total_bytes() const {
          act.bytes() + logits.bytes() + next_token.bytes();
 }
 
-Model Model::load(const std::string& path, int max_tokens) {
+Model Model::load(const std::string& path, int max_tokens, int max_seqs) {
   const ModelFile file = ModelFile::load(path);
   const ModelConfig& c = file.config();
 
@@ -388,25 +388,25 @@ Model Model::load(const std::string& path, int max_tokens) {
          std::to_string(c.max_seq_len));
   }
   model.act_.allocate(c, max_tokens);
-  model.cache_.allocate(c, max_tokens);
+  model.cache_.allocate(c, max_tokens, max_seqs);
 
   return model;
 }
 
-void Model::forward(const std::int32_t* host_ids, int n_tokens) {
+void Model::forward(const std::int32_t* host_ids, int n_tokens, int slot) {
   if (n_tokens <= 0) fail("forward called with no tokens");
   if (n_tokens > act_.max_tokens) {
     fail("forward called with " + std::to_string(n_tokens) + " tokens, workspace holds " +
          std::to_string(act_.max_tokens));
   }
 
-  const int cache_len = cache_.length();
+  const int cache_len = cache_.length(slot);
   if (cache_len + n_tokens > cache_.max_tokens()) {
     fail("sequence of " + std::to_string(cache_len + n_tokens) + " tokens exceeds cache capacity " +
          std::to_string(cache_.max_tokens()));
   }
 
-  cache_.reserve(n_tokens);
+  cache_.reserve(slot, n_tokens);
 
   std::vector<std::int32_t> positions(n_tokens);
   for (int i = 0; i < n_tokens; ++i) positions[i] = cache_len + i;
@@ -466,13 +466,13 @@ void Model::forward(const std::int32_t* host_ids, int n_tokens) {
     profile_end();
 
     profile_begin_cost("kv_write", kv_write_cost(n_tokens, kv_dim()));
-    cache_.write(static_cast<int>(li), k, v, n_tokens);
+    cache_.write(slot, static_cast<int>(li), k, v, n_tokens);
     profile_end();
 
     // Attention reads KV cache
     profile_begin_cost("attn.qk", attention_qk_cost(n_tokens, n_keys, heads, kv_heads, head_dim));
-    launch_attention_qk(q, cache_.k_pages(static_cast<int>(li)), scores, n_tokens, n_keys, heads,
-                        kv_heads, head_dim, cache_len);
+    launch_attention_qk(q, cache_.k_pages(slot, static_cast<int>(li)), scores, n_tokens, n_keys,
+                        heads, kv_heads, head_dim, cache_len);
     profile_end();
 
     profile_begin_cost("attn.softmax", softmax_cost(heads * n_tokens, n_keys));
@@ -480,8 +480,8 @@ void Model::forward(const std::int32_t* host_ids, int n_tokens) {
     profile_end();
 
     profile_begin_cost("attn.av", attention_av_cost(n_tokens, n_keys, heads, kv_heads, head_dim));
-    launch_attention_av(scores, cache_.v_pages(static_cast<int>(li)), attn_out, n_tokens, n_keys,
-                        heads, kv_heads, head_dim);
+    launch_attention_av(scores, cache_.v_pages(slot, static_cast<int>(li)), attn_out, n_tokens,
+                        n_keys, heads, kv_heads, head_dim);
     profile_end();
 
     profile_begin_cost("gemm.wo", matmul_cost(layer.wo, n_tokens, hidden, q_dim()));
@@ -519,7 +519,7 @@ void Model::forward(const std::int32_t* host_ids, int n_tokens) {
     profile_end();
   }
 
-  cache_.advance(n_tokens);
+  cache_.advance(slot, n_tokens);
 
   profile_begin_cost("rmsnorm", rmsnorm_cost(n_tokens, hidden));
   launch_rmsnorm(x, output_norm_, normed, n_tokens, hidden, eps);

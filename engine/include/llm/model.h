@@ -63,17 +63,20 @@ struct Activations {
 
 class Model {
  public:
-  static Model load(const std::string& path, int max_tokens);
+  // max_tokens bounds each sequence; max_seqs is how many sequences the cache holds at once.
+  static Model load(const std::string& path, int max_tokens, int max_seqs = 1);
 
   const ModelConfig& config() const { return config_; }
   std::size_t weight_bytes() const { return weights_.bytes(); }
   std::size_t workspace_bytes() const { return act_.total_bytes(); }
   std::size_t cache_bytes() const { return cache_.bytes(); }
   int max_tokens() const { return act_.max_tokens; }
+  int max_seqs() const { return cache_.max_seqs(); }
 
-  void forward(const std::int32_t* host_ids, int n_tokens);
+  // Runs n_tokens of one sequence, appending them to that sequence's cache slot.
+  void forward(const std::int32_t* host_ids, int n_tokens, int slot = 0);
 
-  void reset_cache() { cache_.reset(); }
+  void reset_cache() { cache_.reset_all(); }
 
   const KVCache& cache() const { return cache_; }
   void shuffle_cache_pages(std::uint32_t seed) { cache_.shuffle_free_pages(seed); }

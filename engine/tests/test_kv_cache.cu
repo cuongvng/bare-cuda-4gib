@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <set>
 
 #include "llm/model.h"
 #include "ref_fixture.h"
@@ -56,6 +57,63 @@ bool check_cache_vram(const llm::ModelConfig& config) {
   return ok;
 }
 
+// Slots growing in turn must never share a page, and each table row must mirror its slot.
+bool check_slots(const llm::ModelConfig& config) {
+  constexpr int kSlots = 3;
+  constexpr int kTokens = 3 * llm::kKVTokensPerPage;
+  llm::KVCache cache;
+  cache.allocate(config, kTokens, kSlots);
+
+  // Uneven growth interleaves pages across slots, the way batched decode will.
+  const int grow[kSlots] = {70, 5, 130};
+  for (int done = 0; done < kTokens; done += llm::kKVTokensPerPage / 2) {
+    for (int s = 0; s < kSlots; ++s) {
+      const int n = std::min(grow[s] - cache.length(s), llm::kKVTokensPerPage / 2);
+      if (n <= 0) continue;
+      cache.reserve(s, n);
+      cache.advance(s, n);
+    }
+  }
+
+  bool ok = true;
+  std::set<std::int32_t> seen;
+  std::vector<std::int32_t> table(static_cast<std::size_t>(kSlots) * cache.max_pages_per_seq());
+  LLM_CUDA_CHECK(cudaMemcpy(table.data(), cache.page_table(), table.size() * sizeof(std::int32_t),
+                            cudaMemcpyDeviceToHost));
+  for (int s = 0; s < kSlots; ++s) {
+    const std::vector<std::int32_t>& pages = cache.page_ids(s);
+    const int expect = (grow[s] + llm::kKVTokensPerPage - 1) / llm::kKVTokensPerPage;
+    if (static_cast<int>(pages.size()) != expect) {
+      std::fprintf(stderr, "FAIL slot %d holds %zu pages, expected %d\n", s, pages.size(), expect);
+      ok = false;
+    }
+    for (std::size_t i = 0; i < pages.size(); ++i) {
+      if (!seen.insert(pages[i]).second) {
+        std::fprintf(stderr, "FAIL page %d handed to two slots\n", pages[i]);
+        ok = false;
+      }
+      if (table[s * cache.max_pages_per_seq() + i] != pages[i]) {
+        std::fprintf(stderr, "FAIL slot %d table entry %zu differs from its host copy\n", s, i);
+        ok = false;
+      }
+    }
+  }
+
+  const int free_before = cache.pool().free_pages();
+  const std::size_t released = cache.page_ids(1).size();
+  const std::vector<std::int32_t> other = cache.page_ids(2);
+  cache.reset(1);
+  if (cache.pool().free_pages() != free_before + static_cast<int>(released) ||
+      cache.length(1) != 0 || cache.page_ids(2) != other) {
+    std::fprintf(stderr, "FAIL resetting slot 1 did not return exactly its own pages\n");
+    ok = false;
+  }
+
+  std::printf("slots: %d sequences of %d/%d/%d tokens share %d pages without overlap\n", kSlots,
+              grow[0], grow[1], grow[2], static_cast<int>(seen.size()));
+  return ok;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -77,7 +135,7 @@ int main(int argc, char** argv) {
   const std::vector<std::int32_t> incremental = model.generate(prompt, kSteps);
   LLM_CUDA_CHECK_LAUNCH();
 
-  const std::vector<std::int32_t>& pages = model.cache().page_ids();
+  const std::vector<std::int32_t>& pages = model.cache().page_ids(0);
   std::printf("pages used, in token order:");
   for (const std::int32_t page : pages) std::printf(" %d", page);
   std::printf("\n");
@@ -121,6 +179,7 @@ int main(int argc, char** argv) {
   bool ok = check_int_equal("decoded ids", incremental, cacheless);
   ok &= check_close("final logits", cached_row, cacheless_row, 1e-5f, 1e-5f);
   ok &= check_cache_vram(model.config());
+  ok &= check_slots(model.config());
 
   if (!ok) return EXIT_FAILURE;
   std::printf("PASS: %d incremental decode steps over scattered pages match a cacheless pass exactly\n",
