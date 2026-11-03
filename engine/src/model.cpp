@@ -472,7 +472,7 @@ void Model::forward(const std::int32_t* host_ids, int n_tokens, int slot) {
     // Attention reads KV cache
     profile_begin_cost("attn.qk", attention_qk_cost(n_tokens, n_keys, heads, kv_heads, head_dim));
     launch_attention_qk(q, cache_.k_pages(slot, static_cast<int>(li)), scores, n_tokens, n_keys,
-                        heads, kv_heads, head_dim, cache_len);
+                        heads, kv_heads, head_dim, d_positions);
     profile_end();
 
     profile_begin_cost("attn.softmax", softmax_cost(heads * n_tokens, n_keys));
@@ -481,7 +481,7 @@ void Model::forward(const std::int32_t* host_ids, int n_tokens, int slot) {
 
     profile_begin_cost("attn.av", attention_av_cost(n_tokens, n_keys, heads, kv_heads, head_dim));
     launch_attention_av(scores, cache_.v_pages(slot, static_cast<int>(li)), attn_out, n_tokens,
-                        n_keys, heads, kv_heads, head_dim);
+                        n_keys, heads, kv_heads, head_dim, d_positions);
     profile_end();
 
     profile_begin_cost("gemm.wo", matmul_cost(layer.wo, n_tokens, hidden, q_dim()));

@@ -4,6 +4,7 @@
 // it away.
 #include <cstdio>
 #include <cstdlib>
+#include <numeric>
 
 #include "llm/kernels.h"
 #include "ref_fixture.h"
@@ -39,8 +40,13 @@ int main(int argc, char** argv) {
   llm::KVPages v_pages = k_pages;
   v_pages.pool = d_v.as<float>();
 
+  // A full prefill: query i sits at position i.
+  std::vector<std::int32_t> positions(n_tokens);
+  std::iota(positions.begin(), positions.end(), 0);
+  llm::DeviceBuffer d_positions = llm::make_device_buffer(positions);
+
   llm::launch_attention_qk(d_q.as<float>(), k_pages, d_scores.as<float>(), n_tokens, n_tokens,
-                           n_heads, n_kv_heads, head_dim, /*query_pos_offset=*/0);
+                           n_heads, n_kv_heads, head_dim, d_positions.as<std::int32_t>());
   LLM_CUDA_CHECK_LAUNCH();
   bool ok = check_close("attention_qk", download_fp32(d_scores, scores_expected.size()),
                         scores_expected, 1e-4f, 1e-4f);
@@ -51,7 +57,7 @@ int main(int argc, char** argv) {
                     1e-6f, 1e-5f);
 
   llm::launch_attention_av(d_scores.as<float>(), v_pages, d_out.as<float>(), n_tokens, n_tokens,
-                           n_heads, n_kv_heads, head_dim);
+                           n_heads, n_kv_heads, head_dim, d_positions.as<std::int32_t>());
   LLM_CUDA_CHECK_LAUNCH();
   ok &= check_close("attention_av", download_fp32(d_out, out_expected.size()), out_expected, 1e-5f,
                     1e-5f);

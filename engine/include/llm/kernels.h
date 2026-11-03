@@ -15,6 +15,7 @@ struct KVPages {
   std::size_t page_stride = 0;   // floats from one page to the next
   std::size_t layer_offset = 0;  // floats from a page's start to this layer's rows
   int token_shift = 0;
+  std::size_t table_stride = 0;  // entries from one query row's table to the next; 0 shares one
 };
 
 // Puts every token in page 0, so one unbroken buffer can pose as a paged cache.
@@ -80,27 +81,30 @@ void launch_kv_cache_write(const float* new_k, const float* new_v, float* k_cach
                            int n_new, int start_pos, int kv_dim, void* stream = nullptr);
 
 // scores[h, i, j] = dot(q[i, h, :], k[j, kv_head(h), :]) / sqrt(head_dim),
-// with -inf written wherever key j is in the future of query i. A query at row
-// i has absolute position `query_pos_offset + i`, so a full-sequence prefill
-// passes 0 and a single decode step passes the token's position -- the same
-// kernel serves both.
+// with -inf written wherever key j is in the future of query i. Query row i has
+// absolute position `positions[i]` (device int32 [n_query]) and reads its keys
+// through page-table row i * k.table_stride, so one launch serves a prefill
+// (one table, positions start_pos + i) or a batch of decodes (a table and a
+// position per sequence). n_keys is the score row width: the longest row's key count.
 //
 // GQA: kv_head(h) = h / (n_heads / n_kv_heads).
 // q is [n_query, n_heads, head_dim], k holds n_keys rows of [n_kv_heads, head_dim],
 // scores is [n_heads, n_query, n_keys].
 void launch_attention_qk(const float* q, const KVPages& k, float* scores, int n_query, int n_keys,
-                         int n_heads, int n_kv_heads, int head_dim, int query_pos_offset,
+                         int n_heads, int n_kv_heads, int head_dim, const std::int32_t* positions,
                          void* stream = nullptr);
 
 // In-place softmax over the last dimension of an [n_rows, row_len] array.
 // Entries masked to -inf by attention_qk must come out as exactly 0.
 void launch_softmax_rows(float* x, int n_rows, int row_len, void* stream = nullptr);
 
-// out[i, h, :] = sum_j probs[h, i, j] * v[j, kv_head(h), :].
+// out[i, h, :] = sum_j probs[h, i, j] * v[j, kv_head(h), :] over j <= positions[i],
+// with the same per-row positions and page tables as attention_qk.
 // probs is [n_heads, n_query, n_keys], v holds n_keys rows of [n_kv_heads, head_dim],
 // out is [n_query, n_heads, head_dim].
 void launch_attention_av(const float* probs, const KVPages& v, float* out, int n_query, int n_keys,
-                         int n_heads, int n_kv_heads, int head_dim, void* stream = nullptr);
+                         int n_heads, int n_kv_heads, int head_dim, const std::int32_t* positions,
+                         void* stream = nullptr);
 
 // out[i] = silu(gate[i]) * up[i], where silu(z) = z * sigmoid(z).
 void launch_swiglu(const float* gate, const float* up, float* out, std::size_t n,

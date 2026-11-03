@@ -14,15 +14,16 @@ namespace {
 //
 // One block per (head, query): head_dim floats of shared memory, one warp-shaped
 // walk over the keys.
-__global__ void attention_qk_kernel(const float* __restrict__ q, const KVPages k,
+__global__ void attention_qk_kernel(const float* __restrict__ q, const KVPages k_all,
                                     float* __restrict__ scores, int n_query, int n_keys,
                                     int n_heads, int n_kv_heads, int head_dim,
-                                    int query_pos_offset) {
+                                    const std::int32_t* __restrict__ positions) {
   extern __shared__ float q_shared[];
 
   const int query = blockIdx.x;
   const int head = blockIdx.y;
   const int kv_head = head / (n_heads / n_kv_heads);
+  const KVPages k = kv_pages_for_row(k_all, query);
 
   // Staged once, then read by every key below -- the one piece of reuse in this
   // kernel, and the reason it is worth a barrier.
@@ -30,7 +31,7 @@ __global__ void attention_qk_kernel(const float* __restrict__ q, const KVPages k
   for (int d = threadIdx.x; d < head_dim; d += blockDim.x) q_shared[d] = q_vec[d];
   __syncthreads();
 
-  const int last_key = query_pos_offset + query;
+  const int last_key = positions[query];
   const float scale = rsqrtf(static_cast<float>(head_dim));
   float* score_row = scores + (static_cast<std::size_t>(head) * n_query + query) * n_keys;
 
@@ -71,13 +72,13 @@ __global__ void attention_qk_kernel(const float* __restrict__ q, const KVPages k
 }  // namespace
 
 void launch_attention_qk(const float* q, const KVPages& k, float* scores, int n_query, int n_keys,
-                         int n_heads, int n_kv_heads, int head_dim, int query_pos_offset,
+                         int n_heads, int n_kv_heads, int head_dim, const std::int32_t* positions,
                          void* stream) {
   if (n_query == 0 || n_keys == 0 || n_heads == 0) return;
   const dim3 grid(n_query, n_heads);
   const std::size_t shared_bytes = head_dim * sizeof(float);
   attention_qk_kernel<<<grid, kDefaultBlockSize, shared_bytes, static_cast<cudaStream_t>(stream)>>>(
-      q, k, scores, n_query, n_keys, n_heads, n_kv_heads, head_dim, query_pos_offset);
+      q, k, scores, n_query, n_keys, n_heads, n_kv_heads, head_dim, positions);
   LLM_CUDA_CHECK(cudaGetLastError());
 }
 

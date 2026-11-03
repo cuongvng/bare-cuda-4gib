@@ -40,6 +40,13 @@ inline int clamped_grid(int want) {
   return want > kMaxGridSize ? kMaxGridSize : want;
 }
 
+// One query row's view of the cache: its own page-table row when table_stride is set.
+__device__ __forceinline__ KVPages kv_pages_for_row(const KVPages& pages, int row) {
+  KVPages view = pages;
+  view.page_table += static_cast<std::size_t>(row) * pages.table_stride;
+  return view;
+}
+
 // Start of this layer's rows in the page holding `token`; costs one page table read.
 __device__ __forceinline__ const float* kv_page_rows(const KVPages& pages, int token) {
   const std::size_t page = pages.page_table[token >> pages.token_shift];
