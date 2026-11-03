@@ -16,6 +16,17 @@
 //   TPS   decode throughput, (tokens - 1) / (E2E - TTFT), so prefill doesn't
 //         dilute it; plus the end-to-end rate tokens / E2E for reference.
 //
+// With --batch N, each request is N copies of the prompt through
+// Model::generate_batch(), all admitted at once. The latency rows are then per
+// sequence, and two batch rows report the whole batch's rate:
+//
+//   TPS batch (decode)  N * (tokens - 1) / (last token - last first token):
+//                       every sequence decoding together, prefills excluded.
+//   TPS batch (e2e)     N * tokens / (request start -> last token).
+//
+// Prefills run one after another before decoding starts, so sequence k waits
+// for k earlier prefills and TTFT spreads out across the batch.
+//
 // With --kernels, one extra request runs with CUDA-event timing around every
 // region of the layer graph, and the per-kernel table underneath answers the
 // question the request metrics raise but cannot settle: which operator the time
@@ -33,6 +44,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -51,7 +63,7 @@ double ms_between(Clock::time_point a, Clock::time_point b) {
 void usage(const char* argv0) {
   std::fprintf(stderr,
                "usage: %s --model <file.llmbin> (--prompt <id,id,...> | --prompt-len N)\n"
-               "          [--tokens N] [--runs N] [--warmup N]\n"
+               "          [--tokens N] [--runs N] [--warmup N] [--batch N] [--kernels]\n"
                "\n"
                "  --model       path to a converted .llmbin model\n"
                "  --prompt      comma-separated int32 token ids (offline-tokenized)\n"
@@ -59,7 +71,9 @@ void usage(const char* argv0) {
                "                length, not content, so this is how to sweep prompt size\n"
                "  --tokens      tokens to generate per request (default 32)\n"
                "  --runs        measured requests (default 20)\n"
-               "  --warmup      unmeasured requests first, to settle clocks and caches (default 2)\n",
+               "  --warmup      unmeasured requests first, to settle clocks and caches (default 2)\n"
+               "  --batch       decode N copies of the prompt together through generate_batch\n"
+               "  --kernels     add a per-kernel breakdown of one profiled request\n",
                argv0);
 }
 
@@ -116,18 +130,56 @@ struct RunResult {
   std::vector<double> tpot_ms;  // one per token after the first
 };
 
+RunResult from_stamps(Clock::time_point start, const std::vector<Clock::time_point>& stamps) {
+  RunResult r;
+  r.ttft_ms = ms_between(start, stamps.front());
+  r.e2e_ms = ms_between(start, stamps.back());
+  for (std::size_t i = 1; i < stamps.size(); ++i) r.tpot_ms.push_back(ms_between(stamps[i - 1], stamps[i]));
+  return r;
+}
+
 RunResult run_request(llm::Model& model, const std::vector<std::int32_t>& prompt, int tokens) {
   std::vector<Clock::time_point> stamps;
   stamps.reserve(tokens);
 
   const Clock::time_point start = Clock::now();
   model.generate(prompt, tokens, [&](int, std::int32_t) { stamps.push_back(Clock::now()); });
+  return from_stamps(start, stamps);
+}
 
-  RunResult r;
-  r.ttft_ms = ms_between(start, stamps.front());
-  r.e2e_ms = ms_between(start, stamps.back());
-  for (std::size_t i = 1; i < stamps.size(); ++i) r.tpot_ms.push_back(ms_between(stamps[i - 1], stamps[i]));
-  return r;
+struct BatchResult {
+  std::vector<RunResult> seqs;
+  double decode_ms = 0.0;  // last sequence's first token -> last token overall
+  double wall_ms = 0.0;    // request start -> last token overall
+};
+
+BatchResult run_batch(llm::Model& model, const std::vector<std::int32_t>& prompt, int tokens,
+                      int batch) {
+  const std::vector<std::vector<std::int32_t>> prompts(batch, prompt);
+  std::vector<std::vector<Clock::time_point>> stamps(batch);
+  for (auto& s : stamps) s.reserve(tokens);
+
+  const Clock::time_point start = Clock::now();
+  model.generate_batch(prompts, tokens,
+                       [&](int seq, int, std::int32_t) { stamps[seq].push_back(Clock::now()); });
+
+  BatchResult b;
+  Clock::time_point last_first = start, last = start;
+  for (const auto& s : stamps) {
+    b.seqs.push_back(from_stamps(start, s));
+    last_first = std::max(last_first, s.front());
+    last = std::max(last, s.back());
+  }
+  b.decode_ms = ms_between(last_first, last);
+  b.wall_ms = ms_between(start, last);
+  return b;
+}
+
+// The sequence that finished last stands for the whole batch.
+RunResult slowest(const BatchResult& b) {
+  return *std::max_element(b.seqs.begin(), b.seqs.end(), [](const RunResult& x, const RunResult& y) {
+    return x.e2e_ms < y.e2e_ms;
+  });
 }
 
 // Peak numbers for the installed device, used only as roofline denominators.
@@ -153,12 +205,12 @@ DevicePeaks device_peaks() {
   return p;
 }
 
-void print_kernel_report(llm::Model& model, const std::vector<std::int32_t>& prompt, int tokens) {
+void print_kernel_report(const std::function<RunResult()>& run) {
   llm::KernelProfiler& profiler = llm::KernelProfiler::get();
   profiler.reset();
   profiler.enable(true);
   const Clock::time_point start = Clock::now();
-  const RunResult profiled = run_request(model, prompt, tokens);
+  const RunResult profiled = run();
   const double wall_ms = ms_between(start, Clock::now());
   profiler.enable(false);
 
@@ -210,6 +262,7 @@ int main(int argc, char** argv) {
   int tokens = 32;
   int runs = 20;
   int warmup = 2;
+  int batch = 0;  // 0: the single-request path through generate()
   bool profile_kernels = false;
 
   for (int i = 1; i < argc; ++i) {
@@ -226,6 +279,12 @@ int main(int argc, char** argv) {
       runs = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "--warmup") == 0 && has_value) {
       warmup = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "--batch") == 0 && has_value) {
+      batch = std::atoi(argv[++i]);
+      if (batch < 1) {
+        usage(argv[0]);
+        return EXIT_FAILURE;
+      }
     } else if (std::strcmp(argv[i], "--kernels") == 0) {
       profile_kernels = true;
     } else {
@@ -258,7 +317,7 @@ int main(int argc, char** argv) {
   }
 
   const Clock::time_point load_start = Clock::now();
-  llm::Model model = llm::Model::load(model_path, prompt_tokens + tokens);
+  llm::Model model = llm::Model::load(model_path, prompt_tokens + tokens, std::max(batch, 1));
   LLM_CUDA_CHECK(cudaDeviceSynchronize());
   const double load_ms = ms_between(load_start, Clock::now());
 
@@ -269,8 +328,9 @@ int main(int argc, char** argv) {
 
   const double mib = 1024.0 * 1024.0;
   std::printf("model      %s\n", model_path.c_str());
-  std::printf("request    prompt %d tokens, generate %d tokens | %d warmup + %d measured runs\n",
-              prompt_tokens, tokens, warmup, runs);
+  std::printf("request    prompt %d tokens, generate %d tokens", prompt_tokens, tokens);
+  if (batch > 0) std::printf(", %d sequences decoded together", batch);
+  std::printf(" | %d warmup + %d measured runs\n", warmup, runs);
   std::printf("load       %.0f ms (disk read + VRAM upload, excluded below)\n", load_ms);
   std::printf("vram       %.1f MiB measured by cudaMemGetInfo | %.1f weights + %.1f workspace + "
               "%.1f kv cache accounted\n",
@@ -280,19 +340,39 @@ int main(int argc, char** argv) {
               model.kv_pages(), llm::kKVTokensPerPage, model.max_batch_size(),
               model.max_tokens());
 
-  for (int i = 0; i < warmup; ++i) run_request(model, prompt, tokens);
+  if (batch > model.max_batch_size()) {
+    // Queued sequences would start late and blur every metric below.
+    std::fprintf(stderr, "[llm] --batch %d, but the KV pool holds only %d sequences of %d tokens\n",
+                 batch, model.max_batch_size(), model.max_tokens());
+    return EXIT_FAILURE;
+  }
+
+  // One request: a single sequence, or a batch of them.
+  auto request = [&]() {
+    if (batch == 0) return BatchResult{{run_request(model, prompt, tokens)}, 0.0, 0.0};
+    return run_batch(model, prompt, tokens, batch);
+  };
+
+  for (int i = 0; i < warmup; ++i) request();
 
   std::vector<double> ttft, e2e, tps_decode, tps_e2e, tpot_all;
-  std::vector<double> tpot_first, tpot_last;  // per run: first and last decode gap
+  std::vector<double> tpot_first, tpot_last;  // per sequence: first and last decode gap
+  std::vector<double> batch_decode, batch_e2e;  // per run, whole batch
   for (int i = 0; i < runs; ++i) {
-    const RunResult r = run_request(model, prompt, tokens);
-    ttft.push_back(r.ttft_ms);
-    e2e.push_back(r.e2e_ms);
-    tps_decode.push_back((tokens - 1) / ((r.e2e_ms - r.ttft_ms) / 1000.0));
-    tps_e2e.push_back(tokens / (r.e2e_ms / 1000.0));
-    tpot_all.insert(tpot_all.end(), r.tpot_ms.begin(), r.tpot_ms.end());
-    tpot_first.push_back(r.tpot_ms.front());
-    tpot_last.push_back(r.tpot_ms.back());
+    const BatchResult b = request();
+    for (const RunResult& r : b.seqs) {
+      ttft.push_back(r.ttft_ms);
+      e2e.push_back(r.e2e_ms);
+      tps_decode.push_back((tokens - 1) / ((r.e2e_ms - r.ttft_ms) / 1000.0));
+      tps_e2e.push_back(tokens / (r.e2e_ms / 1000.0));
+      tpot_all.insert(tpot_all.end(), r.tpot_ms.begin(), r.tpot_ms.end());
+      tpot_first.push_back(r.tpot_ms.front());
+      tpot_last.push_back(r.tpot_ms.back());
+    }
+    if (batch > 0) {
+      batch_decode.push_back(batch * (tokens - 1) / (b.decode_ms / 1000.0));
+      batch_e2e.push_back(batch * tokens / (b.wall_ms / 1000.0));
+    }
   }
 
   std::printf("  %-14s %-5s %10s %10s %10s %10s %10s %10s\n", "metric", "unit", "mean", "p50", "p90",
@@ -304,8 +384,13 @@ int main(int argc, char** argv) {
   print_row("E2E latency", "ms", e2e);
   print_row("TPS (decode)", "tok/s", tps_decode);
   print_row("TPS (e2e)", "tok/s", tps_e2e);
+  if (batch > 0) {
+    print_row("TPS batch (dec)", "tok/s", batch_decode);
+    print_row("TPS batch (e2e)", "tok/s", batch_e2e);
+    std::printf("\n  rows above the batch rows are per sequence; batch rows are whole-batch rates\n");
+  }
 
-  if (profile_kernels) print_kernel_report(model, prompt, tokens);
+  if (profile_kernels) print_kernel_report([&]() { return slowest(request()); });
 
   if (runs < 100) {
     // Nearest-rank p99 of fewer than 100 samples is simply the maximum.
