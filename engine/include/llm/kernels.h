@@ -16,6 +16,7 @@ struct KVPages {
   std::size_t layer_offset = 0;  // floats from a page's start to this layer's rows
   int token_shift = 0;
   std::size_t table_stride = 0;  // entries from one query row's table to the next; 0 shares one
+  const std::int32_t* row_slot = nullptr;  // table row each query row reads; null means row r reads r
 };
 
 // Puts every token in page 0, so one unbroken buffer can pose as a paged cache.

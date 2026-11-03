@@ -1,5 +1,6 @@
 #include "llm/model.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -245,6 +246,7 @@ void Activations::allocate(const ModelConfig& config, int tokens) {
 
   ids.allocate(t * sizeof(std::int32_t));
   positions.allocate(t * sizeof(std::int32_t));
+  row_slots.allocate(t * sizeof(std::int32_t));
 
   x.allocate(t * hidden * sizeof(float));
   normed.allocate(t * hidden * sizeof(float));
@@ -262,7 +264,7 @@ void Activations::allocate(const ModelConfig& config, int tokens) {
 }
 
 std::size_t Activations::total_bytes() const {
-  return ids.bytes() + positions.bytes() + x.bytes() + normed.bytes() + q.bytes() + k.bytes() +
+  return ids.bytes() + positions.bytes() + row_slots.bytes() + x.bytes() + normed.bytes() + q.bytes() + k.bytes() +
          v.bytes() + scores.bytes() + attn_out.bytes() + proj.bytes() + gate.bytes() + up.bytes() +
          act.bytes() + logits.bytes() + next_token.bytes();
 }
@@ -395,24 +397,59 @@ Model Model::load(const std::string& path, int max_tokens, int max_seqs) {
 
 void Model::forward(const std::int32_t* host_ids, int n_tokens, int slot) {
   if (n_tokens <= 0) fail("forward called with no tokens");
+  forward_rows(host_ids, std::vector<int>(n_tokens, slot));
+}
+
+void Model::forward_decode(const std::int32_t* host_ids, const int* slots, int n_seqs) {
+  if (n_seqs <= 0) fail("forward_decode called with no sequences");
+  forward_rows(host_ids, std::vector<int>(slots, slots + n_seqs));
+}
+
+void Model::forward_rows(const std::int32_t* host_ids, const std::vector<int>& row_slots) {
+  const int n_tokens = static_cast<int>(row_slots.size());
   if (n_tokens > act_.max_tokens) {
     fail("forward called with " + std::to_string(n_tokens) + " tokens, workspace holds " +
          std::to_string(act_.max_tokens));
   }
 
-  const int cache_len = cache_.length(slot);
-  if (cache_len + n_tokens > cache_.max_tokens()) {
-    fail("sequence of " + std::to_string(cache_len + n_tokens) + " tokens exceeds cache capacity " +
-         std::to_string(cache_.max_tokens()));
+  // Each run of equal slots is one sequence's new tokens, appended after what it has cached.
+  struct Group {
+    int slot, first_row, count;
+  };
+  std::vector<Group> groups;
+  std::vector<char> seen(cache_.max_seqs(), 0);
+  for (int row = 0; row < n_tokens; ++row) {
+    const int slot = row_slots[row];
+    if (!groups.empty() && groups.back().slot == slot) {
+      ++groups.back().count;
+      continue;
+    }
+    if (slot < 0 || slot >= cache_.max_seqs()) {
+      fail("slot " + std::to_string(slot) + " out of range, cache holds " +
+           std::to_string(cache_.max_seqs()));
+    }
+    if (seen[slot]) fail("slot " + std::to_string(slot) + " appears in two places in one pass");
+    seen[slot] = 1;
+    groups.push_back({slot, row, 1});
   }
 
-  cache_.reserve(slot, n_tokens);
-
   std::vector<std::int32_t> positions(n_tokens);
-  for (int i = 0; i < n_tokens; ++i) positions[i] = cache_len + i;
-  act_.ids.upload(host_ids, static_cast<std::size_t>(n_tokens) * sizeof(std::int32_t));
-  act_.positions.upload(positions.data(),
-                        static_cast<std::size_t>(n_tokens) * sizeof(std::int32_t));
+  int n_keys = 0;
+  for (const Group& g : groups) {
+    const int cache_len = cache_.length(g.slot);
+    if (cache_len + g.count > cache_.max_tokens()) {
+      fail("sequence of " + std::to_string(cache_len + g.count) +
+           " tokens exceeds cache capacity " + std::to_string(cache_.max_tokens()));
+    }
+    cache_.reserve(g.slot, g.count);
+    for (int i = 0; i < g.count; ++i) positions[g.first_row + i] = cache_len + i;
+    n_keys = std::max(n_keys, cache_len + g.count);
+  }
+
+  const std::size_t row_bytes = static_cast<std::size_t>(n_tokens) * sizeof(std::int32_t);
+  act_.ids.upload(host_ids, row_bytes);
+  act_.positions.upload(positions.data(), row_bytes);
+  act_.row_slots.upload(row_slots.data(), row_bytes);
 
   const int hidden = static_cast<int>(config_.hidden_size);
   const int inter = static_cast<int>(config_.intermediate_size);
@@ -421,10 +458,10 @@ void Model::forward(const std::int32_t* host_ids, int n_tokens, int slot) {
   const int head_dim = static_cast<int>(config_.head_dim);
   const float eps = config_.rms_norm_eps;
   const std::size_t hidden_elems = static_cast<std::size_t>(n_tokens) * hidden;
-  const int n_keys = cache_len + n_tokens;
 
   const std::int32_t* d_ids = act_.ids.as<std::int32_t>();
   const std::int32_t* d_positions = act_.positions.as<std::int32_t>();
+  const std::int32_t* d_row_slots = act_.row_slots.as<std::int32_t>();
   float* x = act_.x.as<float>();
   float* normed = act_.normed.as<float>();
   float* q = act_.q.as<float>();
@@ -466,13 +503,16 @@ void Model::forward(const std::int32_t* host_ids, int n_tokens, int slot) {
     profile_end();
 
     profile_begin_cost("kv_write", kv_write_cost(n_tokens, kv_dim()));
-    cache_.write(slot, static_cast<int>(li), k, v, n_tokens);
+    for (const Group& g : groups) {
+      const std::size_t offset = static_cast<std::size_t>(g.first_row) * kv_dim();
+      cache_.write(g.slot, static_cast<int>(li), k + offset, v + offset, g.count);
+    }
     profile_end();
 
     // Attention reads KV cache
     profile_begin_cost("attn.qk", attention_qk_cost(n_tokens, n_keys, heads, kv_heads, head_dim));
-    launch_attention_qk(q, cache_.k_pages(slot, static_cast<int>(li)), scores, n_tokens, n_keys,
-                        heads, kv_heads, head_dim, d_positions);
+    launch_attention_qk(q, cache_.k_pages_batch(static_cast<int>(li), d_row_slots), scores,
+                        n_tokens, n_keys, heads, kv_heads, head_dim, d_positions);
     profile_end();
 
     profile_begin_cost("attn.softmax", softmax_cost(heads * n_tokens, n_keys));
@@ -480,8 +520,8 @@ void Model::forward(const std::int32_t* host_ids, int n_tokens, int slot) {
     profile_end();
 
     profile_begin_cost("attn.av", attention_av_cost(n_tokens, n_keys, heads, kv_heads, head_dim));
-    launch_attention_av(scores, cache_.v_pages(slot, static_cast<int>(li)), attn_out, n_tokens,
-                        n_keys, heads, kv_heads, head_dim, d_positions);
+    launch_attention_av(scores, cache_.v_pages_batch(static_cast<int>(li), d_row_slots), attn_out,
+                        n_tokens, n_keys, heads, kv_heads, head_dim, d_positions);
     profile_end();
 
     profile_begin_cost("gemm.wo", matmul_cost(layer.wo, n_tokens, hidden, q_dim()));
@@ -519,7 +559,7 @@ void Model::forward(const std::int32_t* host_ids, int n_tokens, int slot) {
     profile_end();
   }
 
-  cache_.advance(slot, n_tokens);
+  for (const Group& g : groups) cache_.advance(g.slot, g.count);
 
   profile_begin_cost("rmsnorm", rmsnorm_cost(n_tokens, hidden));
   launch_rmsnorm(x, output_norm_, normed, n_tokens, hidden, eps);

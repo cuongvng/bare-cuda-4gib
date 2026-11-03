@@ -30,6 +30,10 @@ class KVCache {
   KVPages k_pages(int slot, int layer) const;
   KVPages v_pages(int slot, int layer) const;
 
+  // One layer across slots: query row r reads the pages of slot row_slot[r] (device int32).
+  KVPages k_pages_batch(int layer, const std::int32_t* row_slot) const;
+  KVPages v_pages_batch(int layer, const std::int32_t* row_slot) const;
+
   int length(int slot) const { return slot_at(slot).length; }
 
   void advance(int slot, int n_new);

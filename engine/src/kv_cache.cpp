@@ -114,6 +114,20 @@ KVPages KVCache::v_pages(int slot, int layer) const {
   return pages;
 }
 
+KVPages KVCache::k_pages_batch(int layer, const std::int32_t* row_slot) const {
+  KVPages pages = pages_at(0, layer);
+  pages.table_stride = max_pages_per_seq_;
+  pages.row_slot = row_slot;
+  return pages;
+}
+
+KVPages KVCache::v_pages_batch(int layer, const std::int32_t* row_slot) const {
+  KVPages pages = v_pages(0, layer);
+  pages.table_stride = max_pages_per_seq_;
+  pages.row_slot = row_slot;
+  return pages;
+}
+
 void KVCache::advance(int slot, int n_new) {
   if (n_new < 0) fail("advance called with a negative count");
   Slot& s = slot_at(slot);

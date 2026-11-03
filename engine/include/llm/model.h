@@ -42,6 +42,7 @@ struct Activations {
 
   DeviceBuffer ids;        // int32  [max_tokens]
   DeviceBuffer positions;  // int32  [max_tokens]
+  DeviceBuffer row_slots;  // int32  [max_tokens]                cache slot of each row
 
   DeviceBuffer x;          // float  [max_tokens, hidden]        residual stream
   DeviceBuffer normed;     // float  [max_tokens, hidden]        norm output
@@ -76,6 +77,10 @@ class Model {
   // Runs n_tokens of one sequence, appending them to that sequence's cache slot.
   void forward(const std::int32_t* host_ids, int n_tokens, int slot = 0);
 
+  // One decode step for several sequences: host_ids[b] is the next token of the one in slots[b].
+  // Logits row b belongs to slots[b].
+  void forward_decode(const std::int32_t* host_ids, const int* slots, int n_seqs);
+
   void reset_cache() { cache_.reset_all(); }
 
   const KVCache& cache() const { return cache_; }
@@ -103,6 +108,9 @@ class Model {
   const __half* output_norm_ = nullptr;     // [hidden]
   QuantWeight lm_head_;                     // [vocab, hidden]
   std::vector<LayerWeights> layers_;
+
+  // Runs one row per entry of row_slots; rows of the same sequence must be adjacent.
+  void forward_rows(const std::int32_t* host_ids, const std::vector<int>& row_slots);
 
   int q_dim() const { return static_cast<int>(config_.num_heads * config_.head_dim); }
   int kv_dim() const { return static_cast<int>(config_.num_kv_heads * config_.head_dim); }

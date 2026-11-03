@@ -43,7 +43,8 @@ inline int clamped_grid(int want) {
 // One query row's view of the cache: its own page-table row when table_stride is set.
 __device__ __forceinline__ KVPages kv_pages_for_row(const KVPages& pages, int row) {
   KVPages view = pages;
-  view.page_table += static_cast<std::size_t>(row) * pages.table_stride;
+  const int table_row = pages.row_slot ? pages.row_slot[row] : row;
+  view.page_table += static_cast<std::size_t>(table_row) * pages.table_stride;
   return view;
 }
 

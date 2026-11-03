@@ -97,17 +97,21 @@ constexpr int kBatchSize = sizeof(kBatch) / sizeof(kBatch[0]);
 constexpr int kBatchTablePages = 4;  // the longest sequence's page count
 
 // Several decodes in one launch, each through its own table row, must equal each run alone.
+// Table rows are stored in reverse, so batch row b only finds its pages through row_slot.
 bool check_batched_decode(const std::vector<float>& q_rows, const llm::DeviceBuffer& d_q,
                           const llm::KVPages& k_paged, const llm::KVPages& v_paged,
                           const std::vector<std::int32_t>& table, std::int32_t padding_page) {
   std::vector<std::int32_t> batch_table(kBatchSize * kBatchTablePages, padding_page);
+  std::vector<std::int32_t> row_slot;
   std::vector<float> batch_q;
   std::vector<std::int32_t> positions;
   int n_keys = 0;
   for (int b = 0; b < kBatchSize; ++b) {
     const BatchSeq& s = kBatch[b];
     const int pages = (s.length + kTokensPerPage - 1) / kTokensPerPage;
-    std::copy_n(table.begin() + s.first_page, pages, batch_table.begin() + b * kBatchTablePages);
+    row_slot.push_back(kBatchSize - 1 - b);
+    std::copy_n(table.begin() + s.first_page, pages,
+                batch_table.begin() + row_slot.back() * kBatchTablePages);
     const std::size_t q_row = static_cast<std::size_t>(s.first_page * kTokensPerPage + s.length - 1);
     batch_q.insert(batch_q.end(), q_rows.begin() + q_row * kHeads * kHeadDim,
                    q_rows.begin() + (q_row + 1) * kHeads * kHeadDim);
@@ -117,12 +121,15 @@ bool check_batched_decode(const std::vector<float>& q_rows, const llm::DeviceBuf
 
   llm::DeviceBuffer d_batch_table = llm::make_device_buffer(batch_table);
   llm::DeviceBuffer d_batch_q = llm::make_device_buffer(batch_q);
+  llm::DeviceBuffer d_row_slot = llm::make_device_buffer(row_slot);
   llm::KVPages k_batch = k_paged;
   k_batch.page_table = d_batch_table.as<std::int32_t>();
   k_batch.table_stride = kBatchTablePages;
+  k_batch.row_slot = d_row_slot.as<std::int32_t>();
   llm::KVPages v_batch = v_paged;
   v_batch.page_table = k_batch.page_table;
   v_batch.table_stride = kBatchTablePages;
+  v_batch.row_slot = k_batch.row_slot;
   const Result got = run_attention(d_batch_q.as<float>(), k_batch, v_batch, n_keys, positions);
 
   bool ok = true;
