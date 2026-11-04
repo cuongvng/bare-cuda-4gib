@@ -34,5 +34,6 @@ enable_testing()
 
 add_subdirectory(engine)
 add_subdirectory(bench)
+add_subdirectory(server)
 
 message(STATUS "bare-cuda-4gib: CUDA ${CUDAToolkit_VERSION}, arch sm_${LLM_CUDA_ARCH}, build ${CMAKE_BUILD_TYPE}")

@@ -1,0 +1,6 @@
+# Runtime of server/app.py, plus pybind11 to build the llm_engine_py module.
+fastapi>=0.100
+uvicorn>=0.23
+transformers>=4.38
+jinja2>=3.1
+pybind11>=2.11
