@@ -130,6 +130,15 @@ int main(int argc, char** argv) {
     }
   }
 
+  {
+    const llm::SchedulerStats st = engine.stats();
+    if (st.running != 0 || st.waiting != 0 || st.kv_pages_used != 0 || st.decode_tokens != n * (kSteps - 1)) {
+      std::fprintf(stderr, "FAIL stats after drain: %d running, %d waiting, %d pages, %lld decoded\n",
+                   st.running, st.waiting, st.kv_pages_used, static_cast<long long>(st.decode_tokens));
+      ok = false;
+    }
+  }
+
   // A live id is refused; a cancel ends a request with one cancelled event, and frees its id.
   if (!engine.submit(make(200, prompts[0], kSteps)).ok() ||
       engine.submit(make(200, prompts[1], 1)).status != SubmitStatus::kInvalid) {

@@ -131,6 +131,22 @@ int main(int argc, char** argv) {
     run_to_idle(s, out);
     for (int p = 0; p < n; ++p) ok &= expect("late", out, p, alone[p], FinishReason::kLength);
     ok &= out.ok && all_pages_free("late", model);
+
+    // Each request's first token comes from its prefill, the other kSteps - 1 from decode passes.
+    const llm::SchedulerStats st = s.stats();
+    std::int64_t prompt_tokens = 0;
+    for (const auto& p : prompts) prompt_tokens += static_cast<std::int64_t>(p.size());
+    if (st.prefill_tokens != prompt_tokens || st.decode_tokens != n * (kSteps - 1) ||
+        st.running != 0 || st.waiting != 0 || st.kv_pages_used != 0 || st.kv_pages_committed != 0 ||
+        st.steps <= 0 || st.busy_seconds <= 0.0) {
+      std::fprintf(stderr,
+                   "FAIL stats: prefill %lld (want %lld), decode %lld (want %d), running %d, "
+                   "waiting %d, pages %d/%d, steps %lld\n",
+                   static_cast<long long>(st.prefill_tokens), static_cast<long long>(prompt_tokens),
+                   static_cast<long long>(st.decode_tokens), n * (kSteps - 1), st.running, st.waiting,
+                   st.kv_pages_used, st.kv_pages_committed, static_cast<long long>(st.steps));
+      ok = false;
+    }
   }
 
   // Own budgets and stop ids: a short budget, a stop id, and a request done at prefill.

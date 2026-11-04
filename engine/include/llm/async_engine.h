@@ -62,6 +62,9 @@ class AsyncEngine {
   // Stops the worker; waiting and running requests are dropped.
   void stop();
 
+  // The scheduler's stats as of its last step; waiting also counts requests not yet picked up.
+  SchedulerStats stats() const;
+
   bool healthy() const;
   std::string failure() const;  // why the engine failed; empty while healthy
 
@@ -91,6 +94,7 @@ class AsyncEngine {
   bool stopping_ = false;
   std::string failure_;
   std::string injected_failure_;
+  SchedulerStats stats_;
 
   // Outbox: events for whoever polls.
   std::mutex out_mu_;

@@ -145,7 +145,24 @@ void Scheduler::expire(std::vector<TokenEvent>& events) {
   running_ = std::move(still_running);
 }
 
+SchedulerStats Scheduler::stats() const {
+  SchedulerStats s = totals_;
+  s.running = num_running();
+  s.waiting = num_waiting();
+  s.kv_pages_used = model_.cache().pool().pages_in_use();
+  s.kv_pages_committed = committed_pages_;
+  s.kv_pages_total = limits_.kv_pages;
+  return s;
+}
+
 std::vector<TokenEvent> Scheduler::step() {
+  const Clock::time_point start = Clock::now();
+  std::vector<TokenEvent> events = run_step();
+  totals_.busy_seconds += std::chrono::duration<double>(Clock::now() - start).count();
+  return events;
+}
+
+std::vector<TokenEvent> Scheduler::run_step() {
   std::vector<TokenEvent> events;
   expire(events);
 
@@ -163,6 +180,7 @@ std::vector<TokenEvent> Scheduler::step() {
 
     const int len = static_cast<int>(req.prompt.size());
     model_.forward(req.prompt.data(), len, r.slot);
+    totals_.prefill_tokens += len;
     const std::int32_t token = choose(r, model_.argmax_last(len), len - 1);
     if (!emit(r, token, events)) running_.push_back(std::move(r));
   }
@@ -176,6 +194,8 @@ std::vector<TokenEvent> Scheduler::step() {
   }
   const int n = static_cast<int>(running_.size());
   model_.forward_decode(ids.data(), slots.data(), n);
+  totals_.steps += 1;
+  totals_.decode_tokens += n;
   const std::vector<std::int32_t> next = model_.argmax_rows(n);
 
   std::vector<Running> still_running;

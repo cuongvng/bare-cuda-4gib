@@ -33,6 +33,19 @@ struct TokenEvent {
   FinishReason finish = FinishReason::kNone;
 };
 
+// Counters since the scheduler started, plus a snapshot of what it holds now.
+struct SchedulerStats {
+  int running = 0;
+  int waiting = 0;
+  int kv_pages_used = 0;       // held by running requests now
+  int kv_pages_committed = 0;  // promised to running requests for their whole run
+  int kv_pages_total = 0;
+  std::int64_t steps = 0;           // decode passes
+  std::int64_t prefill_tokens = 0;  // prompt tokens run through the model
+  std::int64_t decode_tokens = 0;   // rows decoded, one per running request per pass
+  double busy_seconds = 0.0;        // wall time spent inside step()
+};
+
 // What the engine can hold; fixed once the model is loaded.
 struct EngineLimits {
   int max_tokens = 0;  // per sequence, prompt plus generated
@@ -68,6 +81,7 @@ class Scheduler {
   bool idle() const { return waiting_.empty() && running_.empty(); }
   int num_waiting() const { return static_cast<int>(waiting_.size()); }
   int num_running() const { return static_cast<int>(running_.size()); }
+  SchedulerStats stats() const;
 
  private:
   using Clock = std::chrono::steady_clock;
@@ -90,6 +104,8 @@ class Scheduler {
     Clock::time_point deadline;
   };
 
+  std::vector<TokenEvent> run_step();
+
   // Drops every request whose deadline has passed, with a timeout event each.
   void expire(std::vector<TokenEvent>& events);
 
@@ -109,6 +125,7 @@ class Scheduler {
   std::vector<Running> running_;
   std::vector<int> free_slots_;
   int committed_pages_ = 0;  // promised to running requests, held or still to be taken
+  SchedulerStats totals_;     // only the counters are kept up to date here
 };
 
 }  // namespace llm

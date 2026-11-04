@@ -83,6 +83,20 @@ PYBIND11_MODULE(llm_engine_py, m) {
       .def("poll", &poll, py::arg("timeout_ms") = 100,
            "Waits for events: a list of (id, token, index, finish) tuples.")
       .def("stop", &llm::AsyncEngine::stop, py::call_guard<py::gil_scoped_release>())
+      .def("stats", [](const llm::AsyncEngine& e) {
+            const llm::SchedulerStats s = e.stats();
+            py::dict d;
+            d["running"] = s.running;
+            d["waiting"] = s.waiting;
+            d["kv_pages_used"] = s.kv_pages_used;
+            d["kv_pages_committed"] = s.kv_pages_committed;
+            d["kv_pages_total"] = s.kv_pages_total;
+            d["steps"] = s.steps;
+            d["prefill_tokens"] = s.prefill_tokens;
+            d["decode_tokens"] = s.decode_tokens;
+            d["busy_seconds"] = s.busy_seconds;
+            return d;
+          }, "Engine counters and a snapshot of what it holds, as a dict.")
       .def_property_readonly("healthy", &llm::AsyncEngine::healthy)
       .def_property_readonly("failure", &llm::AsyncEngine::failure)
       .def("_fail_for_test", &llm::AsyncEngine::fail_for_test, py::arg("message"))

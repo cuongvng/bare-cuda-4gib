@@ -21,6 +21,8 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import List, Optional, Union
 
+from metrics import Metrics, RequestTimer
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -39,6 +41,8 @@ class AsyncLLM:
         self.engine = engine
         self.loop = asyncio.get_running_loop()
         self.queues = {}
+        self.timers = {}
+        self.metrics = Metrics()
         self.ids = itertools.count()
         self.running = True
         self.thread = threading.Thread(target=self._dispatch, name="llm-dispatch", daemon=True)
@@ -58,21 +62,30 @@ class AsyncLLM:
         status, message = self.engine.submit(rid, prompt_ids, max_new_tokens, stop_ids, **options)
         if status != "ok":
             del self.queues[rid]
+            self.metrics.refuse(status)
             raise Refused(status, message)
+        self.timers[rid] = RequestTimer(len(prompt_ids))
         return rid
 
     async def stream(self, rid):
         """Yields (token, finish) until the request ends; cancels it if the caller stops early."""
         finished = False
+        reason = "cancelled"  # unless the engine says otherwise, the caller walked away
+        timer = self.timers[rid]
         try:
             while True:
                 _, token, _, finish = await self.queues[rid].get()
+                if token >= 0:
+                    timer.token()
                 finished = bool(finish)
+                if finished:
+                    reason = finish
                 yield token, finish
                 if finished:
                     return
         finally:
             self.queues.pop(rid, None)
+            self.metrics.finish(self.timers.pop(rid), reason)
             if not finished:
                 self.engine.cancel(rid)
 
@@ -101,7 +114,7 @@ class Detokenizer:
 
 def build_app(args):
     from fastapi import FastAPI
-    from fastapi.responses import JSONResponse, StreamingResponse
+    from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
     from pydantic import BaseModel
     from transformers import AutoTokenizer
 
@@ -133,6 +146,10 @@ def build_app(args):
         top_p: Optional[float] = None
         top_k: Optional[int] = None
         seed: Optional[int] = None
+        ignore_eos: bool = False
+        stream_options: Optional[dict] = None
+        ignore_eos: bool = False  # non-OpenAI: always generate max_tokens, for benchmarks
+        stream_options: Optional[dict] = None
 
     class ChatMessage(BaseModel):
         role: str
@@ -164,6 +181,13 @@ def build_app(args):
         headers = {"Retry-After": "1"} if kind == "busy" else None
         return JSONResponse(error_body(message, kind), status_code=failures[kind][0], headers=headers)
 
+    def usage(prompt_ids, count):
+        return {"prompt_tokens": len(prompt_ids), "completion_tokens": count,
+                "total_tokens": len(prompt_ids) + count}
+
+    def wants_usage(req):
+        return bool(req.stream_options and req.stream_options.get("include_usage"))
+
     def failure_message(finish, count):
         if finish == "timeout":
             return f"request timed out after {args.request_timeout} s ({count} tokens generated)"
@@ -185,7 +209,7 @@ def build_app(args):
         llm = state["llm"]
         budget = req.max_tokens if req.max_tokens is not None else llm.engine.max_tokens
         try:
-            rid = llm.submit(prompt_ids, budget, stop_ids, **sampling(req))
+            rid = llm.submit(prompt_ids, budget, [] if req.ignore_eos else stop_ids, **sampling(req))
         except Refused as e:
             return None, error(str(e), e.status)
         meta = {"id": f"{kind}-{uuid.uuid4().hex[:24]}", "created": int(time.time()),
@@ -208,6 +232,12 @@ def build_app(args):
             return JSONResponse({"status": "failed", "error": engine.failure}, status_code=503)
         return {"status": "ok", "max_seqs": engine.max_seqs, "kv_pages": engine.kv_pages,
                 "max_tokens": engine.max_tokens}
+
+    @app.get("/metrics")
+    async def metrics():
+        llm = state["llm"]
+        return PlainTextResponse(llm.metrics.render(llm.engine.stats(), llm.engine.healthy),
+                                 media_type="text/plain; version=0.0.4")
 
     @app.get("/v1/models")
     async def models():
@@ -235,6 +265,8 @@ def build_app(args):
                         yield sse({**base, "choices": [choice]})
                     if finish in failures:
                         yield sse(error_body(failure_message(finish, count), finish))
+                if wants_usage(req):
+                    yield sse({**base, "choices": [], "usage": usage(prompt_ids, count)})
                 yield "data: [DONE]\n\n"
             return StreamingResponse(events(), media_type="text/event-stream")
 
@@ -243,8 +275,7 @@ def build_app(args):
             return error(failure_message(finish, count), finish)
         return {**base,
                 "choices": [{"index": 0, "text": text, "logprobs": None, "finish_reason": finish}],
-                "usage": {"prompt_tokens": len(prompt_ids), "completion_tokens": count,
-                          "total_tokens": len(prompt_ids) + count}}
+                "usage": usage(prompt_ids, count)}
 
     @app.post("/v1/chat/completions")
     async def chat_completions(req: ChatRequest):
@@ -277,6 +308,8 @@ def build_app(args):
                                                         "finish_reason": finish}]})
                     if finish in failures:
                         yield sse(error_body(failure_message(finish, count), finish))
+                if wants_usage(req):
+                    yield sse({**base, "choices": [], "usage": usage(prompt_ids, count)})
                 yield "data: [DONE]\n\n"
             return StreamingResponse(events(), media_type="text/event-stream")
 
@@ -286,8 +319,7 @@ def build_app(args):
         return {**meta, "object": "chat.completion",
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
                              "finish_reason": finish}],
-                "usage": {"prompt_tokens": len(prompt_ids), "completion_tokens": count,
-                          "total_tokens": len(prompt_ids) + count}}
+                "usage": usage(prompt_ids, count)}
 
     return app
 

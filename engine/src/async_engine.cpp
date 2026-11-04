@@ -86,6 +86,13 @@ void AsyncEngine::stop() {
   out_cv_.notify_all();
 }
 
+SchedulerStats AsyncEngine::stats() const {
+  std::lock_guard<std::mutex> lock(in_mu_);
+  SchedulerStats s = stats_;
+  s.waiting += static_cast<int>(inbox_.size());
+  return s;
+}
+
 bool AsyncEngine::healthy() const {
   std::lock_guard<std::mutex> lock(in_mu_);
   return failure_.empty();
@@ -142,6 +149,7 @@ void AsyncEngine::run(const EngineOptions& options) {
       std::lock_guard<std::mutex> lock(in_mu_);
       config_ = model.config();
       limits_ = scheduler.limits();
+      stats_ = scheduler.stats();
       ready_ = true;
     }
     in_cv_.notify_all();
@@ -182,6 +190,9 @@ void AsyncEngine::loop(Scheduler& scheduler) {
     }
     publish(std::move(events));
     if (!scheduler.idle()) publish(scheduler.step());
+    const SchedulerStats snapshot = scheduler.stats();
+    std::lock_guard<std::mutex> lock(in_mu_);
+    stats_ = snapshot;
   }
 }
 
