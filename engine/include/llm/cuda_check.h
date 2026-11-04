@@ -2,16 +2,16 @@
 
 #include <cuda_runtime.h>
 
-#include <cstdio>
-#include <cstdlib>
+#include <string>
+
+#include "llm/error.h"
 
 namespace llm {
 
 inline void cuda_check(cudaError_t err, const char* expr, const char* file, int line) {
   if (err != cudaSuccess) {
-    std::fprintf(stderr, "[CUDA] %s:%d: %s failed: %s (%s)\n", file, line, expr,
-                 cudaGetErrorName(err), cudaGetErrorString(err));
-    std::exit(EXIT_FAILURE);
+    raise_error(std::string("[CUDA] ") + file + ":" + std::to_string(line) + ": " + expr +
+                " failed: " + cudaGetErrorName(err) + " (" + cudaGetErrorString(err) + ")");
   }
 }
 

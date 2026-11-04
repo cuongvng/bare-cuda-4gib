@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <random>
@@ -11,7 +12,7 @@
 
 namespace llm {
 
-enum class FinishReason { kNone, kStop, kLength, kCancelled };
+enum class FinishReason { kNone, kStop, kLength, kCancelled, kTimeout, kError };
 
 const char* finish_reason_name(FinishReason reason);
 
@@ -21,6 +22,7 @@ struct Request {
   int max_new_tokens = 16;
   std::vector<std::int32_t> stop_ids;  // generating any of these ends the request, e.g. EOS
   SamplingParams sampling;             // greedy by default
+  int timeout_ms = 0;                  // from submit, waiting plus running; 0 never times out
 };
 
 // One generated token, or a request ending without one (token -1, e.g. cancelled).
@@ -59,8 +61,8 @@ class Scheduler {
   // Drops a waiting or running request and frees its pages. False if the id is unknown.
   bool cancel(std::int64_t id);
 
-  // Admits waiting requests in order while slots and pages allow (prefilling each),
-  // then runs one decode pass over every running request.
+  // Ends requests past their deadline, admits waiting ones in order while slots and pages allow
+  // (prefilling each), then runs one decode pass over every running request.
   std::vector<TokenEvent> step();
 
   bool idle() const { return waiting_.empty() && running_.empty(); }
@@ -68,6 +70,13 @@ class Scheduler {
   int num_running() const { return static_cast<int>(running_.size()); }
 
  private:
+  using Clock = std::chrono::steady_clock;
+
+  struct Waiting {
+    Request request;
+    Clock::time_point deadline;
+  };
+
   struct Running {
     std::int64_t id;
     int slot;
@@ -78,7 +87,11 @@ class Scheduler {
     std::vector<std::int32_t> stop_ids;
     SamplingParams sampling;
     std::mt19937_64 rng;  // per request, so a seed gives the same tokens alone or batched
+    Clock::time_point deadline;
   };
+
+  // Drops every request whose deadline has passed, with a timeout event each.
+  void expire(std::vector<TokenEvent>& events);
 
   static int target_tokens(const EngineLimits& limits, const Request& r);
   static int pages_needed(const EngineLimits& limits, const Request& r);
@@ -92,7 +105,7 @@ class Scheduler {
 
   Model& model_;
   EngineLimits limits_;
-  std::deque<Request> waiting_;
+  std::deque<Waiting> waiting_;
   std::vector<Running> running_;
   std::vector<int> free_slots_;
   int committed_pages_ = 0;  // promised to running requests, held or still to be taken

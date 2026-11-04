@@ -5,13 +5,12 @@
 #include <cstdlib>
 #include <string>
 
+#include "llm/error.h"
+
 namespace llm {
 namespace {
 
-[[noreturn]] void fail(const std::string& message) {
-  std::fprintf(stderr, "[llm] kv_cache: %s\n", message.c_str());
-  std::exit(EXIT_FAILURE);
-}
+[[noreturn]] void fail(const std::string& message) { raise_error("[llm] kv_cache: " + message); }
 
 }  // namespace
 

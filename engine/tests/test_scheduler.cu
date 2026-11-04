@@ -1,10 +1,12 @@
 // The scheduler must give each request the ids it would get decoded alone, however requests
 // arrive, end (budget, stop id) or get cancelled, and hand every page back at the end.
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "llm/model.h"
@@ -33,6 +35,8 @@ void collect(const std::vector<llm::TokenEvent>& events, Outcome& out) {
                    static_cast<long long>(e.id));
       out.ok = false;
     }
+    if (e.finish != llm::FinishReason::kNone) out.finish[e.id] = e.finish;
+    if (e.token < 0) continue;  // ended without a token, e.g. timed out
     auto& toks = out.tokens[e.id];
     if (e.index != static_cast<int>(toks.size())) {
       std::fprintf(stderr, "FAIL request %lld event index %d, expected %zu\n",
@@ -40,7 +44,6 @@ void collect(const std::vector<llm::TokenEvent>& events, Outcome& out) {
       out.ok = false;
     }
     toks.push_back(e.token);
-    if (e.finish != llm::FinishReason::kNone) out.finish[e.id] = e.finish;
   }
 }
 
@@ -197,6 +200,27 @@ int main(int argc, char** argv) {
     ok &= out.ok && out2.ok && all_pages_free("sampling", model);
   }
 
+  // Timeouts: one running and one still waiting pass their deadline; the others carry on.
+  {
+    constexpr int kTimeoutMs = 200;
+    llm::Scheduler s(model);
+    Outcome out;
+    for (int p = 0; p < n; ++p) {
+      llm::Request r = make(p, prompts[p], kSteps);
+      if (p == 1 || p == 3) r.timeout_ms = kTimeoutMs;
+      s.submit(std::move(r));
+    }
+    for (int i = 0; i < 3; ++i) collect(s.step(), out);
+    const std::size_t before = out.tokens[1].size();
+    std::this_thread::sleep_for(std::chrono::milliseconds(kTimeoutMs + 50));
+    run_to_idle(s, out);
+    ok &= expect("timeout", out, 0, alone[0], FinishReason::kLength);
+    ok &= expect("timeout running", out, 1, prefix(alone[1], before), FinishReason::kTimeout);
+    ok &= expect("timeout", out, 2, alone[2], FinishReason::kLength);
+    ok &= expect("timeout waiting", out, 3, {}, FinishReason::kTimeout);
+    ok &= out.ok && all_pages_free("timeout", model);
+  }
+
   // check() refuses what could never run.
   {
     llm::Scheduler s(model);
@@ -215,6 +239,6 @@ int main(int argc, char** argv) {
   }
 
   if (!ok) return EXIT_FAILURE;
-  std::printf("PASS: late arrivals, budgets, stop ids, cancels and sampling all behave\n");
+  std::printf("PASS: late arrivals, budgets, stop ids, cancels, sampling and timeouts all behave\n");
   return EXIT_SUCCESS;
 }

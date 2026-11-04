@@ -24,6 +24,14 @@ from typing import List, Optional, Union
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+class Refused(Exception):
+    """The engine turned a request away; status is "invalid", "busy" or "unavailable"."""
+
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+
+
 class AsyncLLM:
     """Bridges the engine's worker thread to asyncio: one thread polls, one queue per request."""
 
@@ -43,14 +51,14 @@ class AsyncLLM:
                 if queue is not None:
                     self.loop.call_soon_threadsafe(queue.put_nowait, event)
 
-    def submit(self, prompt_ids, max_new_tokens, stop_ids, **sampling):
-        """Queues a request and returns its id; raises ValueError if the engine refuses it."""
+    def submit(self, prompt_ids, max_new_tokens, stop_ids, **options):
+        """Queues a request and returns its id; raises Refused if the engine turns it away."""
         rid = next(self.ids)
         self.queues[rid] = asyncio.Queue()  # registered first, so no event can arrive unrouted
-        error = self.engine.submit(rid, prompt_ids, max_new_tokens, stop_ids, **sampling)
-        if error:
+        status, message = self.engine.submit(rid, prompt_ids, max_new_tokens, stop_ids, **options)
+        if status != "ok":
             del self.queues[rid]
-            raise ValueError(error)
+            raise Refused(status, message)
         return rid
 
     async def stream(self, rid):
@@ -106,8 +114,8 @@ def build_app(args):
 
     @asynccontextmanager
     async def lifespan(_app):
-        engine = llm_engine_py.Engine(args.model, max_tokens=args.max_tokens,
-                                      max_seqs=args.max_seqs, kv_pages=args.kv_pages)
+        engine = llm_engine_py.Engine(args.model, max_tokens=args.max_tokens, max_seqs=args.max_seqs,
+                                      kv_pages=args.kv_pages, max_waiting=args.max_waiting)
         print(f"[server] engine ready: {engine.max_seqs} slots, {engine.kv_pages} KV pages, "
               f"{engine.max_tokens} tokens per sequence", flush=True)
         state["llm"] = AsyncLLM(engine)
@@ -140,9 +148,26 @@ def build_app(args):
         top_k: Optional[int] = None
         seed: Optional[int] = None
 
-    def error(message, status=400):
-        return JSONResponse({"error": {"message": message, "type": "invalid_request_error"}},
-                            status_code=status)
+    # HTTP status and OpenAI-style error type for each way a request can fail.
+    failures = {
+        "invalid": (400, "invalid_request_error"),
+        "busy": (429, "rate_limit_error"),
+        "unavailable": (503, "service_unavailable"),
+        "timeout": (504, "timeout"),
+        "error": (500, "server_error"),
+    }
+
+    def error_body(message, kind):
+        return {"error": {"message": message, "type": failures[kind][1]}}
+
+    def error(message, kind="invalid"):
+        headers = {"Retry-After": "1"} if kind == "busy" else None
+        return JSONResponse(error_body(message, kind), status_code=failures[kind][0], headers=headers)
+
+    def failure_message(finish, count):
+        if finish == "timeout":
+            return f"request timed out after {args.request_timeout} s ({count} tokens generated)"
+        return "engine failed: " + state["llm"].engine.failure
 
     def sse(payload):
         return f"data: {json.dumps(payload)}\n\n"
@@ -152,7 +177,8 @@ def build_app(args):
         return {"temperature": 1.0 if req.temperature is None else req.temperature,
                 "top_p": 1.0 if req.top_p is None else req.top_p,
                 "top_k": req.top_k or 0,
-                "seed": -1 if req.seed is None else req.seed}
+                "seed": -1 if req.seed is None else req.seed,
+                "timeout_ms": int(args.request_timeout * 1000)}
 
     def start(prompt_ids, req, kind):
         """Submits a request: (llm, id, response metadata, detokenizer), or an error response."""
@@ -160,8 +186,8 @@ def build_app(args):
         budget = req.max_tokens if req.max_tokens is not None else llm.engine.max_tokens
         try:
             rid = llm.submit(prompt_ids, budget, stop_ids, **sampling(req))
-        except ValueError as e:
-            return None, error(str(e))
+        except Refused as e:
+            return None, error(str(e), e.status)
         meta = {"id": f"{kind}-{uuid.uuid4().hex[:24]}", "created": int(time.time()),
                 "model": args.model_name}
         return (llm, rid, meta, Detokenizer(tokenizer)), None
@@ -178,6 +204,8 @@ def build_app(args):
     @app.get("/health")
     async def health():
         engine = state["llm"].engine
+        if not engine.healthy:
+            return JSONResponse({"status": "failed", "error": engine.failure}, status_code=503)
         return {"status": "ok", "max_seqs": engine.max_seqs, "kv_pages": engine.kv_pages,
                 "max_tokens": engine.max_tokens}
 
@@ -197,16 +225,22 @@ def build_app(args):
 
         if req.stream:
             async def events():
+                count = 0
                 async for token, finish in llm.stream(rid):
+                    count += token >= 0
                     delta = detok.add(token) if token >= 0 else ""
                     if delta or finish:
                         choice = {"index": 0, "text": delta, "logprobs": None,
                                   "finish_reason": finish or None}
                         yield sse({**base, "choices": [choice]})
+                    if finish in failures:
+                        yield sse(error_body(failure_message(finish, count), finish))
                 yield "data: [DONE]\n\n"
             return StreamingResponse(events(), media_type="text/event-stream")
 
         text, finish, count = await collect(llm, rid, detok)
+        if finish in failures:
+            return error(failure_message(finish, count), finish)
         return {**base,
                 "choices": [{"index": 0, "text": text, "logprobs": None, "finish_reason": finish}],
                 "usage": {"prompt_tokens": len(prompt_ids), "completion_tokens": count,
@@ -231,7 +265,9 @@ def build_app(args):
             async def events():
                 yield sse({**base, "choices": [{"index": 0, "delta": {"role": "assistant"},
                                                 "finish_reason": None}]})
+                count = 0
                 async for token, finish in llm.stream(rid):
+                    count += token >= 0
                     delta = detok.add(token) if token >= 0 else ""
                     if delta:
                         yield sse({**base, "choices": [{"index": 0, "delta": {"content": delta},
@@ -239,10 +275,14 @@ def build_app(args):
                     if finish:
                         yield sse({**base, "choices": [{"index": 0, "delta": {},
                                                         "finish_reason": finish}]})
+                    if finish in failures:
+                        yield sse(error_body(failure_message(finish, count), finish))
                 yield "data: [DONE]\n\n"
             return StreamingResponse(events(), media_type="text/event-stream")
 
         text, finish, count = await collect(llm, rid, detok)
+        if finish in failures:
+            return error(failure_message(finish, count), finish)
         return {**meta, "object": "chat.completion",
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
                              "finish_reason": finish}],
@@ -262,6 +302,10 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=1024, help="prompt + generated tokens per sequence")
     parser.add_argument("--max-seqs", type=int, default=8, help="sequences decoded at once")
     parser.add_argument("--kv-pages", type=int, default=0, help="KV pool size; 0 fits it to free VRAM")
+    parser.add_argument("--max-waiting", type=int, default=64,
+                        help="requests queued before new ones get HTTP 429; 0 is unlimited")
+    parser.add_argument("--request-timeout", type=float, default=300,
+                        help="seconds a request may wait plus run before HTTP 504; 0 is none")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()

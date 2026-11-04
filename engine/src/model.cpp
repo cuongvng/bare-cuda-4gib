@@ -10,6 +10,8 @@
 #include "llm/profile.h"
 #include "llm/scheduler.h"
 
+#include "llm/error.h"
+
 namespace llm {
 namespace {
 
@@ -17,10 +19,7 @@ constexpr std::size_t kWeightAlign = 256;
 
 std::size_t align_up(std::size_t v, std::size_t a) { return (v + a - 1) / a * a; }
 
-[[noreturn]] void fail(const std::string& message) {
-  std::fprintf(stderr, "[llm] model: %s\n", message.c_str());
-  std::exit(EXIT_FAILURE);
-}
+[[noreturn]] void fail(const std::string& message) { raise_error("[llm] model: " + message); }
 
 void check_tensor(const std::string& name, const TensorView& t, std::size_t expect_elems) {
   if (t.dtype != DType::kFP16) {

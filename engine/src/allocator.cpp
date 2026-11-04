@@ -6,13 +6,12 @@
 #include <random>
 #include <string>
 
+#include "llm/error.h"
+
 namespace llm {
 namespace {
 
-[[noreturn]] void fail(const std::string& message) {
-  std::fprintf(stderr, "[llm] allocator: %s\n", message.c_str());
-  std::exit(EXIT_FAILURE);
-}
+[[noreturn]] void fail(const std::string& message) { raise_error("[llm] allocator: " + message); }
 
 }  // namespace
 

@@ -5,6 +5,8 @@
 #include <cstring>
 #include <fstream>
 
+#include "llm/error.h"
+
 namespace llm {
 namespace {
 
@@ -34,9 +36,8 @@ class Cursor {
  private:
   void require(std::size_t n) {
     if (pos_ + n > size_) {
-      std::fprintf(stderr, "[llm] loader: truncated file (need %zu bytes at offset %zu, have %zu)\n",
-                   n, pos_, size_);
-      std::exit(EXIT_FAILURE);
+      raise_error("[llm] loader: truncated file (need " + std::to_string(n) + " bytes at offset " +
+                  std::to_string(pos_) + ", have " + std::to_string(size_) + ")");
     }
   }
 
@@ -46,8 +47,7 @@ class Cursor {
 };
 
 [[noreturn]] void fail(const std::string& path, const std::string& reason) {
-  std::fprintf(stderr, "[llm] loader: %s: %s\n", path.c_str(), reason.c_str());
-  std::exit(EXIT_FAILURE);
+  raise_error("[llm] loader: " + path + ": " + reason);
 }
 
 }  // namespace
@@ -142,8 +142,7 @@ const TensorView* ModelFile::find(const std::string& name) const {
 const TensorView& ModelFile::require(const std::string& name) const {
   const TensorView* v = find(name);
   if (!v) {
-    std::fprintf(stderr, "[llm] loader: required tensor '%s' not found in model file\n", name.c_str());
-    std::exit(EXIT_FAILURE);
+    raise_error("[llm] loader: required tensor '" + name + "' not found in model file");
   }
   return *v;
 }
