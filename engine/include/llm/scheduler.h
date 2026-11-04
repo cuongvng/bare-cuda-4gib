@@ -2,10 +2,12 @@
 
 #include <cstdint>
 #include <deque>
+#include <random>
 #include <string>
 #include <vector>
 
 #include "llm/model.h"
+#include "llm/sampler.h"
 
 namespace llm {
 
@@ -18,6 +20,7 @@ struct Request {
   std::vector<std::int32_t> prompt;
   int max_new_tokens = 16;
   std::vector<std::int32_t> stop_ids;  // generating any of these ends the request, e.g. EOS
+  SamplingParams sampling;             // greedy by default
 };
 
 // One generated token, or a request ending without one (token -1, e.g. cancelled).
@@ -45,6 +48,9 @@ class Scheduler {
   static std::string check(const EngineLimits& limits, const std::vector<std::int32_t>& prompt,
                            int max_new_tokens);
 
+  // Like above, and also checks the request's sampling params.
+  static std::string check(const EngineLimits& limits, const Request& request);
+
   const EngineLimits& limits() const { return limits_; }
 
   // Queues a request; fails on one that check() refuses.
@@ -70,10 +76,15 @@ class Scheduler {
     int generated;
     std::int32_t last;
     std::vector<std::int32_t> stop_ids;
+    SamplingParams sampling;
+    std::mt19937_64 rng;  // per request, so a seed gives the same tokens alone or batched
   };
 
   static int target_tokens(const EngineLimits& limits, const Request& r);
   static int pages_needed(const EngineLimits& limits, const Request& r);
+
+  // The GPU argmax for greedy requests, else a draw from the given logits row.
+  std::int32_t choose(Running& r, std::int32_t argmax, int logits_row);
 
   // Records the token; true if that finished the request, which is then retired.
   bool emit(Running& r, std::int32_t token, std::vector<TokenEvent>& events);

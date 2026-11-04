@@ -103,6 +103,9 @@ class Model {
   // Copies the logits of the last forward pass back to the host.
   std::vector<float> logits_host(int n_tokens);
 
+  // Copies one logits row of the last forward pass back to the host.
+  std::vector<float> logits_row(int row);
+
   std::int32_t argmax_last(int n_tokens);
 
   // Next token of each of the first n_rows logits rows, e.g. one per sequence after forward_decode.

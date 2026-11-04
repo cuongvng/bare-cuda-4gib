@@ -58,6 +58,15 @@ llm::Request make(std::int64_t id, const std::vector<std::int32_t>& prompt, int 
   return r;
 }
 
+llm::Request sampled(std::int64_t id, const std::vector<std::int32_t>& prompt, float top_p,
+                     std::int64_t seed) {
+  llm::Request r = make(id, prompt, kSteps);
+  r.sampling.temperature = 1.0f;
+  r.sampling.top_p = top_p;
+  r.sampling.seed = seed;
+  return r;
+}
+
 bool expect(const char* label, const Outcome& out, std::int64_t id,
             const std::vector<std::int32_t>& tokens, llm::FinishReason finish) {
   const auto t = out.tokens.find(id);
@@ -158,6 +167,36 @@ int main(int argc, char** argv) {
     ok &= out.ok && all_pages_free("cancel", model);
   }
 
+  // Sampling: a tiny top-p keeps only the top token, so it must equal greedy through the host path;
+  // a seeded draw must repeat exactly whether decoded alone or batched with others.
+  {
+    llm::Scheduler s(model);
+    Outcome out;
+    s.submit(sampled(0, prompts[0], 1e-6f, -1));
+    s.submit(sampled(1, prompts[1], 1.0f, 7));
+    run_to_idle(s, out);
+    const std::vector<std::int32_t> seeded_alone = out.tokens[1];
+
+    llm::Scheduler batched(model);
+    Outcome out2;
+    batched.submit(make(0, prompts[0], kSteps));
+    batched.submit(sampled(1, prompts[1], 1.0f, 7));
+    batched.submit(sampled(2, prompts[1], 1.0f, 8));
+    for (int i = 0; i < 3; ++i) collect(batched.step(), out2);
+    batched.submit(make(3, prompts[3], kSteps));
+    run_to_idle(batched, out2);
+
+    ok &= expect("top_p~0", out, 0, alone[0], FinishReason::kLength);
+    ok &= expect("seed 7 batched", out2, 1, seeded_alone, FinishReason::kLength);
+    ok &= expect("greedy beside sampled", out2, 0, alone[0], FinishReason::kLength);
+    ok &= expect("greedy beside sampled", out2, 3, alone[3], FinishReason::kLength);
+    if (seeded_alone == alone[1] || out2.tokens[2] == seeded_alone) {
+      std::fprintf(stderr, "FAIL sampling at T=1 matched greedy, or seeds 7 and 8 drew the same\n");
+      ok = false;
+    }
+    ok &= out.ok && out2.ok && all_pages_free("sampling", model);
+  }
+
   // check() refuses what could never run.
   {
     llm::Scheduler s(model);
@@ -169,9 +208,13 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "FAIL check() accepted a bad request or refused a good one\n");
       ok = false;
     }
+    if (llm::Scheduler::check(lim, sampled(0, prompts[0], 0.0f, 1)).empty()) {
+      std::fprintf(stderr, "FAIL check() accepted top_p = 0\n");
+      ok = false;
+    }
   }
 
   if (!ok) return EXIT_FAILURE;
-  std::printf("PASS: late arrivals, budgets, stop ids and cancels all match decoding alone\n");
+  std::printf("PASS: late arrivals, budgets, stop ids, cancels and sampling all behave\n");
   return EXIT_SUCCESS;
 }

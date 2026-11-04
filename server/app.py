@@ -1,7 +1,8 @@
 """OpenAI-compatible HTTP server over the bare-cuda-4gib engine.
 
 Text goes through the Hugging Face tokenizer here; the C++ engine only sees token ids.
-Decoding is greedy: temperature / top_p are accepted but ignored for now.
+Sampling follows OpenAI's defaults (temperature 1, top_p 1); temperature 0 is greedy.
+top_k is an extra, non-OpenAI field.
 
 Usage:
     python server/app.py --model model/tinyllama_int4.llmbin \\
@@ -42,11 +43,11 @@ class AsyncLLM:
                 if queue is not None:
                     self.loop.call_soon_threadsafe(queue.put_nowait, event)
 
-    def submit(self, prompt_ids, max_new_tokens, stop_ids):
+    def submit(self, prompt_ids, max_new_tokens, stop_ids, **sampling):
         """Queues a request and returns its id; raises ValueError if the engine refuses it."""
         rid = next(self.ids)
         self.queues[rid] = asyncio.Queue()  # registered first, so no event can arrive unrouted
-        error = self.engine.submit(rid, prompt_ids, max_new_tokens, stop_ids)
+        error = self.engine.submit(rid, prompt_ids, max_new_tokens, stop_ids, **sampling)
         if error:
             del self.queues[rid]
             raise ValueError(error)
@@ -122,6 +123,8 @@ def build_app(args):
         stream: bool = False
         temperature: Optional[float] = None
         top_p: Optional[float] = None
+        top_k: Optional[int] = None
+        seed: Optional[int] = None
 
     class ChatMessage(BaseModel):
         role: str
@@ -134,6 +137,8 @@ def build_app(args):
         stream: bool = False
         temperature: Optional[float] = None
         top_p: Optional[float] = None
+        top_k: Optional[int] = None
+        seed: Optional[int] = None
 
     def error(message, status=400):
         return JSONResponse({"error": {"message": message, "type": "invalid_request_error"}},
@@ -142,12 +147,19 @@ def build_app(args):
     def sse(payload):
         return f"data: {json.dumps(payload)}\n\n"
 
-    def start(prompt_ids, max_tokens, kind):
+    def sampling(req):
+        """Engine sampling kwargs from a request, with OpenAI's defaults for what it leaves out."""
+        return {"temperature": 1.0 if req.temperature is None else req.temperature,
+                "top_p": 1.0 if req.top_p is None else req.top_p,
+                "top_k": req.top_k or 0,
+                "seed": -1 if req.seed is None else req.seed}
+
+    def start(prompt_ids, req, kind):
         """Submits a request: (llm, id, response metadata, detokenizer), or an error response."""
         llm = state["llm"]
-        budget = max_tokens if max_tokens is not None else llm.engine.max_tokens
+        budget = req.max_tokens if req.max_tokens is not None else llm.engine.max_tokens
         try:
-            rid = llm.submit(prompt_ids, budget, stop_ids)
+            rid = llm.submit(prompt_ids, budget, stop_ids, **sampling(req))
         except ValueError as e:
             return None, error(str(e))
         meta = {"id": f"{kind}-{uuid.uuid4().hex[:24]}", "created": int(time.time()),
@@ -177,7 +189,7 @@ def build_app(args):
     @app.post("/v1/completions")
     async def completions(req: CompletionRequest):
         prompt_ids = req.prompt if isinstance(req.prompt, list) else tokenizer(req.prompt).input_ids
-        started, refused = start(prompt_ids, req.max_tokens, "cmpl")
+        started, refused = start(prompt_ids, req, "cmpl")
         if refused:
             return refused
         llm, rid, meta, detok = started
@@ -208,7 +220,7 @@ def build_app(args):
         text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         has_bos = tokenizer.bos_token is not None and text.startswith(tokenizer.bos_token)
         prompt_ids = tokenizer(text, add_special_tokens=not has_bos).input_ids
-        started, refused = start(prompt_ids, req.max_tokens, "chatcmpl")
+        started, refused = start(prompt_ids, req, "chatcmpl")
         if refused:
             return refused
         llm, rid, meta, detok = started

@@ -61,8 +61,13 @@ std::string Scheduler::check(const EngineLimits& limits, const std::vector<std::
   return "";
 }
 
+std::string Scheduler::check(const EngineLimits& limits, const Request& request) {
+  const std::string error = check(limits, request.prompt, request.max_new_tokens);
+  return error.empty() ? check_sampling(request.sampling) : error;
+}
+
 void Scheduler::submit(Request request) {
-  const std::string error = check(limits_, request.prompt, request.max_new_tokens);
+  const std::string error = check(limits_, request);
   if (!error.empty()) fail("request " + std::to_string(request.id) + ": " + error);
   waiting_.push_back(std::move(request));
 }
@@ -82,6 +87,12 @@ bool Scheduler::cancel(std::int64_t id) {
     }
   }
   return false;
+}
+
+std::int32_t Scheduler::choose(Running& r, std::int32_t argmax, int logits_row) {
+  if (r.sampling.greedy()) return argmax;
+  const std::vector<float> logits = model_.logits_row(logits_row);
+  return sample_token(logits.data(), static_cast<int>(logits.size()), r.sampling, r.rng);
 }
 
 bool Scheduler::emit(Running& r, std::int32_t token, std::vector<TokenEvent>& events) {
@@ -116,13 +127,14 @@ std::vector<TokenEvent> Scheduler::step() {
     Request req = std::move(waiting_.front());
     waiting_.pop_front();
     Running r{req.id, free_slots_.back(), pages_needed(limits_, req), target_tokens(limits_, req),
-              0, 0, std::move(req.stop_ids)};
+              0, 0, std::move(req.stop_ids), req.sampling, std::mt19937_64(seed_for(req.sampling))};
     free_slots_.pop_back();
     committed_pages_ += r.pages;
 
     const int len = static_cast<int>(req.prompt.size());
     model_.forward(req.prompt.data(), len, r.slot);
-    if (!emit(r, model_.argmax_last(len), events)) running_.push_back(std::move(r));
+    const std::int32_t token = choose(r, model_.argmax_last(len), len - 1);
+    if (!emit(r, token, events)) running_.push_back(std::move(r));
   }
   if (running_.empty()) return events;
 
@@ -138,7 +150,8 @@ std::vector<TokenEvent> Scheduler::step() {
 
   std::vector<Running> still_running;
   for (int b = 0; b < n; ++b) {
-    if (!emit(running_[b], next[b], events)) still_running.push_back(std::move(running_[b]));
+    const std::int32_t token = choose(running_[b], next[b], b);
+    if (!emit(running_[b], token, events)) still_running.push_back(std::move(running_[b]));
   }
   running_ = std::move(still_running);
   return events;

@@ -624,6 +624,19 @@ std::vector<float> Model::logits_host(int n_tokens) {
   return out;
 }
 
+std::vector<float> Model::logits_row(int row) {
+  if (row < 0 || row >= act_.max_tokens) {
+    fail("logits_row " + std::to_string(row) + " out of range, workspace holds " +
+         std::to_string(act_.max_tokens));
+  }
+  const std::size_t vocab = config_.vocab_size;
+  std::vector<float> out(vocab);
+  LLM_CUDA_CHECK(cudaDeviceSynchronize());
+  LLM_CUDA_CHECK(cudaMemcpy(out.data(), act_.logits.as<float>() + row * vocab, vocab * sizeof(float),
+                            cudaMemcpyDeviceToHost));
+  return out;
+}
+
 std::int32_t Model::argmax_last(int n_tokens) {
   const float* last_row =
       act_.logits.as<float>() + static_cast<std::size_t>(n_tokens - 1) * config_.vocab_size;

@@ -4,6 +4,7 @@ add_library(llm_engine
   src/loader.cpp
   src/kv_cache.cpp
   src/model.cpp
+  src/sampler.cpp
   src/scheduler.cpp
   src/async_engine.cpp
   src/profile.cpp
@@ -51,6 +52,7 @@ set(LLM_TESTS
   test_kv_cache_write
   test_allocator
   test_kv_pages
+  test_sampler
 )
 
 foreach(test_name IN LISTS LLM_TESTS)

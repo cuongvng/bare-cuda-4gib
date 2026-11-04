@@ -16,7 +16,7 @@ AsyncEngine::AsyncEngine(const EngineOptions& options) {
 AsyncEngine::~AsyncEngine() { stop(); }
 
 std::string AsyncEngine::submit(Request request) {
-  const std::string error = Scheduler::check(limits_, request.prompt, request.max_new_tokens);
+  const std::string error = Scheduler::check(limits_, request);
   if (!error.empty()) return error;
   {
     std::lock_guard<std::mutex> lock(in_mu_);

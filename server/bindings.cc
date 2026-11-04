@@ -42,12 +42,17 @@ std::vector<Event> poll(llm::AsyncEngine& engine, int timeout_ms) {
 }
 
 std::string submit(llm::AsyncEngine& engine, std::int64_t id, std::vector<std::int32_t> prompt,
-                   int max_new_tokens, std::vector<std::int32_t> stop_ids) {
+                   int max_new_tokens, std::vector<std::int32_t> stop_ids, float temperature,
+                   float top_p, int top_k, std::int64_t seed) {
   llm::Request r;
   r.id = id;
   r.prompt = std::move(prompt);
   r.max_new_tokens = max_new_tokens;
   r.stop_ids = std::move(stop_ids);
+  r.sampling.temperature = temperature;
+  r.sampling.top_p = top_p;
+  r.sampling.top_k = top_k;
+  r.sampling.seed = seed;
   py::gil_scoped_release release;
   return engine.submit(std::move(r));
 }
@@ -61,8 +66,9 @@ PYBIND11_MODULE(llm_engine_py, m) {
       .def(py::init(&make_engine), py::arg("model_path"), py::arg("max_tokens") = 1024,
            py::arg("max_seqs") = 8, py::arg("kv_pages") = 0)
       .def("submit", &submit, py::arg("id"), py::arg("prompt"), py::arg("max_new_tokens"),
-           py::arg("stop_ids") = std::vector<std::int32_t>{},
-           "Queues a request; returns '' if accepted, else why not.")
+           py::arg("stop_ids") = std::vector<std::int32_t>{}, py::arg("temperature") = 0.0f,
+           py::arg("top_p") = 1.0f, py::arg("top_k") = 0, py::arg("seed") = -1,
+           "Queues a request; returns '' if accepted, else why not. temperature 0 is greedy.")
       .def("cancel", &llm::AsyncEngine::cancel, py::arg("id"),
            py::call_guard<py::gil_scoped_release>())
       .def("poll", &poll, py::arg("timeout_ms") = 100,
