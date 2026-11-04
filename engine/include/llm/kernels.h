@@ -56,6 +56,12 @@ void launch_gemv_fp16(const __half* weight, const float* x, float* y, int n_out,
 void launch_gemm_fp16(const __half* weight, const float* x, float* y, int m_rows, int n_out,
                       int k_in, void* stream = nullptr);
 
+// GEMV over several inputs, with the GEMM's x and y layout; each weight is read once for all
+// rows. For small batches (decode): m_rows <= kGemvBatchMaxRows. Each dtype below has one too.
+constexpr int kGemvBatchMaxRows = 16;
+void launch_gemv_fp16_batch(const __half* weight, const float* x, float* y, int m_rows, int n_out,
+                            int k_in, void* stream = nullptr);
+
 // INT8 versions of the two above: weight is int8 [n_out, k_in], scales is FP16
 // [n_out, k_in / group_size], and w = q * scale.
 // Requires k_in % group_size == 0, group_size % 32 == 0, and a 4-byte-aligned weight.
@@ -63,6 +69,9 @@ void launch_gemv_int8(const std::int8_t* weight, const __half* scales, const flo
                       int n_out, int k_in, int group_size, void* stream = nullptr);
 void launch_gemm_int8(const std::int8_t* weight, const __half* scales, const float* x, float* y,
                       int m_rows, int n_out, int k_in, int group_size, void* stream = nullptr);
+void launch_gemv_int8_batch(const std::int8_t* weight, const __half* scales, const float* x,
+                            float* y, int m_rows, int n_out, int k_in, int group_size,
+                            void* stream = nullptr);
 
 // INT4 versions: weight is [n_out, k_in / 2] bytes, two values per byte with even k in the
 // low nibble; scales and mins are FP16 [n_out, k_in / group_size], and w = q * scale + min.
@@ -73,6 +82,9 @@ void launch_gemv_int4(const std::uint8_t* weight, const __half* scales, const __
 void launch_gemm_int4(const std::uint8_t* weight, const __half* scales, const __half* mins,
                       const float* x, float* y, int m_rows, int n_out, int k_in, int group_size,
                       void* stream = nullptr);
+void launch_gemv_int4_batch(const std::uint8_t* weight, const __half* scales, const __half* mins,
+                            const float* x, float* y, int m_rows, int n_out, int k_in,
+                            int group_size, void* stream = nullptr);
 
 // Appends `n_new` rows of freshly computed K and V into one layer's cache.
 // `new_k` and `new_v` are [n_new, kv_dim]; `k_cache` and `v_cache` are that

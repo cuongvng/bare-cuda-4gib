@@ -1,8 +1,9 @@
-// INT4-weight GEMM vs torch on the dequantized weights, at two group sizes.
+// INT4-weight GEMM and batched GEMV vs torch on the dequantized weights, at two group sizes.
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 #include "llm/kernels.h"
 #include "ref_fixture.h"
@@ -46,9 +47,22 @@ int main(int argc, char** argv) {
     const std::string label1 = label + "(M=1)";
     if (!check_close(label1.c_str(), got_row0, expected_row0, 2e-3f, 2e-3f)) return EXIT_FAILURE;
 
+    // Batched GEMV on the first m rows, at sizes on each side of the kernel's instance boundaries.
+    for (const int m : {2, 3, 4, 5, 8, 9, 16}) {
+      llm::DeviceBuffer d_yb(static_cast<std::size_t>(m) * n_out * sizeof(float));
+      d_yb.zero();
+      llm::launch_gemv_int4_batch(d_w.as<std::uint8_t>(), d_s.as<__half>(), d_m.as<__half>(),
+                                  d_x.as<float>(), d_yb.as<float>(), m, n_out, k_in, group);
+      LLM_CUDA_CHECK_LAUNCH();
+      const std::vector<float> got_b = download_fp32(d_yb, static_cast<std::size_t>(m) * n_out);
+      const std::vector<float> expected_b(expected.begin(), expected.begin() + m * n_out);
+      const std::string label_b = "gemv_int4_batch " + p + "(M=" + std::to_string(m) + ")";
+      if (!check_close(label_b.c_str(), got_b, expected_b, 2e-3f, 2e-3f)) return EXIT_FAILURE;
+    }
+
     std::printf("  %s: %d x %d x %d, group %d\n", label.c_str(), m_rows, n_out, k_in, group);
   }
 
-  std::printf("PASS: gemm_int4 matches reference\n");
+  std::printf("PASS: gemm_int4 and gemv_int4_batch match reference\n");
   return EXIT_SUCCESS;
 }

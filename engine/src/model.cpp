@@ -139,16 +139,33 @@ Cost gemv_cost(int n, int k, double wb) {
   return c;
 }
 
-Cost matmul_cost(const QuantWeight& w, int m, int n, int k) {
-  return m == 1 ? gemv_cost(n, k, weight_bytes(w)) : gemm_cost(m, n, k, weight_bytes(w));
+// GEMV over m inputs: weights read once, every row's warp re-reads all m inputs from cache.
+Cost gemv_batch_cost(int m, int n, int k, double wb) {
+  const double M = m, N = n, K = k;
+  Cost c;
+  c.flops = 2.0 * M * N * K;
+  c.ideal = N * K * wb + M * K * kF32 + M * N * kF32;
+  c.moved = N * K * (wb + M * kF32) + M * N * kF32;
+  c.dram = N * K * wb + dram_term(M * K * kF32, N) + M * N * kF32;
+  return c;
 }
 
-// Decode (one token) is weight-bandwidth bound and goes to the GEMV; prefill reuses weights via the GEMM.
+bool uses_gemv_batch(int m) { return m > 1 && m <= kGemvBatchMaxRows; }
+
+Cost matmul_cost(const QuantWeight& w, int m, int n, int k) {
+  if (m == 1) return gemv_cost(n, k, weight_bytes(w));
+  if (uses_gemv_batch(m)) return gemv_batch_cost(m, n, k, weight_bytes(w));
+  return gemm_cost(m, n, k, weight_bytes(w));
+}
+
+// Decode (one token or a small batch) is weight-bandwidth bound and goes to a GEMV; prefill reuses weights via the GEMM.
 void matmul(const QuantWeight& w, const float* x, float* y, int m, int n, int k) {
   if (w.dtype == DType::kINT8) {
     const auto* q = static_cast<const std::int8_t*>(w.data);
     if (m == 1) {
       launch_gemv_int8(q, w.scales, x, y, n, k, w.group_size);
+    } else if (uses_gemv_batch(m)) {
+      launch_gemv_int8_batch(q, w.scales, x, y, m, n, k, w.group_size);
     } else {
       launch_gemm_int8(q, w.scales, x, y, m, n, k, w.group_size);
     }
@@ -158,6 +175,8 @@ void matmul(const QuantWeight& w, const float* x, float* y, int m, int n, int k)
     const auto* q = static_cast<const std::uint8_t*>(w.data);
     if (m == 1) {
       launch_gemv_int4(q, w.scales, w.mins, x, y, n, k, w.group_size);
+    } else if (uses_gemv_batch(m)) {
+      launch_gemv_int4_batch(q, w.scales, w.mins, x, y, m, n, k, w.group_size);
     } else {
       launch_gemm_int4(q, w.scales, w.mins, x, y, m, n, k, w.group_size);
     }
@@ -165,6 +184,8 @@ void matmul(const QuantWeight& w, const float* x, float* y, int m, int n, int k)
   }
   if (m == 1) {
     launch_gemv_fp16(w.fp16(), x, y, n, k);
+  } else if (uses_gemv_batch(m)) {
+    launch_gemv_fp16_batch(w.fp16(), x, y, m, n, k);
   } else {
     launch_gemm_fp16(w.fp16(), x, y, m, n, k);
   }

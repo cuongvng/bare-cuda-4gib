@@ -184,7 +184,7 @@ def write_gemv(path: str) -> None:
 
 
 def write_gemm(path: str) -> None:
-    m_rows, n_out, k_in = 6, 130, 300
+    m_rows, n_out, k_in = 17, 130, 300
     weight = as_fp16(rand(n_out, k_in))
     x = rand(m_rows, k_in)
 
@@ -418,9 +418,9 @@ FIXTURES = {
     "ref_elementwise.llmbin": write_elementwise,
     # Own numpy seed, so adding these does not shift the torch stream above.
     "ref_gemv_int8.llmbin": lambda path: write_quant_matmul(path, 8, 1, QUANT_SEED),
-    "ref_gemm_int8.llmbin": lambda path: write_quant_matmul(path, 8, 6, QUANT_SEED + 1),
+    "ref_gemm_int8.llmbin": lambda path: write_quant_matmul(path, 8, 17, QUANT_SEED + 1),
     "ref_gemv_int4.llmbin": lambda path: write_quant_matmul(path, 4, 1, QUANT_SEED + 2),
-    "ref_gemm_int4.llmbin": lambda path: write_quant_matmul(path, 4, 6, QUANT_SEED + 3),
+    "ref_gemm_int4.llmbin": lambda path: write_quant_matmul(path, 4, 17, QUANT_SEED + 3),
 }
 
 

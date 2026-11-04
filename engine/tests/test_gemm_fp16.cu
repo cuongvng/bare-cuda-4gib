@@ -1,6 +1,8 @@
-// FP16-weight GEMM (the prefill-shape matmul) vs the torch reference.
+// FP16-weight GEMM (the prefill-shape matmul) and batched GEMV vs the torch reference.
 #include <cstdio>
 #include <cstdlib>
+#include <string>
+#include <vector>
 
 #include "llm/kernels.h"
 #include "ref_fixture.h"
@@ -39,6 +41,19 @@ int main(int argc, char** argv) {
   const std::vector<float> expected_row0(expected.begin(), expected.begin() + n_out);
   if (!check_close("gemm(M=1)", got_row0, expected_row0, 2e-3f, 2e-3f)) return EXIT_FAILURE;
 
-  std::printf("PASS: gemm_fp16 matches reference (%d x %d x %d)\n", m_rows, n_out, k_in);
+  // Batched GEMV on the first m rows, at sizes on each side of the kernel's instance boundaries.
+  for (const int m : {2, 3, 4, 5, 8, 9, 16}) {
+    llm::DeviceBuffer d_yb(static_cast<std::size_t>(m) * n_out * sizeof(float));
+    d_yb.zero();
+    llm::launch_gemv_fp16_batch(d_w.as<__half>(), d_x.as<float>(), d_yb.as<float>(), m, n_out,
+                                k_in);
+    LLM_CUDA_CHECK_LAUNCH();
+    const std::vector<float> got_b = download_fp32(d_yb, static_cast<std::size_t>(m) * n_out);
+    const std::vector<float> expected_b(expected.begin(), expected.begin() + m * n_out);
+    const std::string label_b = "gemv_fp16_batch(M=" + std::to_string(m) + ")";
+    if (!check_close(label_b.c_str(), got_b, expected_b, 2e-3f, 2e-3f)) return EXIT_FAILURE;
+  }
+
+  std::printf("PASS: gemm_fp16 and gemv_fp16_batch match reference (%d x %d x %d)\n", m_rows, n_out, k_in);
   return EXIT_SUCCESS;
 }
