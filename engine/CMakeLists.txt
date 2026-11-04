@@ -4,6 +4,8 @@ add_library(llm_engine
   src/loader.cpp
   src/kv_cache.cpp
   src/model.cpp
+  src/scheduler.cpp
+  src/async_engine.cpp
   src/profile.cpp
   kernels/vector_add.cu
   kernels/embedding_lookup.cu
@@ -30,7 +32,8 @@ target_include_directories(llm_engine
   # part of the engine's interface.
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/kernels
 )
-target_link_libraries(llm_engine PUBLIC CUDA::cudart)
+find_package(Threads REQUIRED)
+target_link_libraries(llm_engine PUBLIC CUDA::cudart Threads::Threads)
 target_compile_definitions(llm_engine PUBLIC LLM_BUILD_SM=${LLM_CUDA_ARCH})
 set_target_properties(llm_engine PROPERTIES
   CUDA_ARCHITECTURES ${LLM_CUDA_ARCH}
@@ -211,4 +214,22 @@ if(LLM_BUILD_REFERENCE_TESTS)
   set_tests_properties(test_batch_decode_int8 PROPERTIES TIMEOUT 300)
   add_test(NAME test_batch_decode_int4 COMMAND test_batch_decode ${LLM_REF_DIR}/ref_model_int4.llmbin)
   set_tests_properties(test_batch_decode_int4 PROPERTIES TIMEOUT 300)
+
+  # Requests arriving, finishing and being cancelled at different times.
+  add_executable(test_scheduler tests/test_scheduler.cu)
+  target_link_libraries(test_scheduler PRIVATE llm_engine)
+  target_include_directories(test_scheduler PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+  add_dependencies(test_scheduler llm_reference_fixtures)
+  set_target_properties(test_scheduler PROPERTIES CUDA_ARCHITECTURES ${LLM_CUDA_ARCH})
+  add_test(NAME test_scheduler COMMAND test_scheduler ${LLM_REF_DIR}/ref_model.llmbin)
+  set_tests_properties(test_scheduler PROPERTIES TIMEOUT 300)
+
+  # The worker thread fed from several submitting threads at once.
+  add_executable(test_async_engine tests/test_async_engine.cu)
+  target_link_libraries(test_async_engine PRIVATE llm_engine)
+  target_include_directories(test_async_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+  add_dependencies(test_async_engine llm_reference_fixtures)
+  set_target_properties(test_async_engine PROPERTIES CUDA_ARCHITECTURES ${LLM_CUDA_ARCH})
+  add_test(NAME test_async_engine COMMAND test_async_engine ${LLM_REF_DIR}/ref_model.llmbin)
+  set_tests_properties(test_async_engine PROPERTIES TIMEOUT 300)
 endif()

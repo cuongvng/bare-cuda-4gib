@@ -1,0 +1,147 @@
+#include "llm/scheduler.h"
+
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+
+namespace llm {
+namespace {
+
+[[noreturn]] void fail(const std::string& message) {
+  std::fprintf(stderr, "[llm] scheduler: %s\n", message.c_str());
+  std::exit(EXIT_FAILURE);
+}
+
+}  // namespace
+
+const char* finish_reason_name(FinishReason reason) {
+  switch (reason) {
+    case FinishReason::kNone: return "";
+    case FinishReason::kStop: return "stop";
+    case FinishReason::kLength: return "length";
+    case FinishReason::kCancelled: return "cancelled";
+  }
+  return "";
+}
+
+Scheduler::Scheduler(Model& model) : model_(model) {
+  limits_.max_tokens = model.max_tokens();
+  limits_.max_seqs = model.max_seqs();
+  limits_.kv_pages = model.kv_pages();
+  for (int s = limits_.max_seqs - 1; s >= 0; --s) free_slots_.push_back(s);
+  model_.reset_cache();
+}
+
+// Like generate(), a sequence stops early at max_tokens; its last token is never cached.
+int Scheduler::target_tokens(const EngineLimits& limits, const Request& r) {
+  return std::min(r.max_new_tokens, limits.max_tokens - static_cast<int>(r.prompt.size()) + 1);
+}
+
+int Scheduler::pages_needed(const EngineLimits& limits, const Request& r) {
+  return KVCache::pages_for(static_cast<int>(r.prompt.size()) + target_tokens(limits, r) - 1);
+}
+
+std::string Scheduler::check(const EngineLimits& limits, const std::vector<std::int32_t>& prompt,
+                             int max_new_tokens) {
+  const int len = static_cast<int>(prompt.size());
+  if (len == 0) return "empty prompt";
+  if (max_new_tokens <= 0) return "max_new_tokens must be positive";
+  if (len > limits.max_tokens) {
+    return "prompt has " + std::to_string(len) + " tokens, the engine holds " +
+           std::to_string(limits.max_tokens) + " per sequence";
+  }
+  Request r;
+  r.prompt = prompt;
+  r.max_new_tokens = max_new_tokens;
+  const int pages = pages_needed(limits, r);
+  if (pages > limits.kv_pages) {
+    return "request needs " + std::to_string(pages) + " KV pages, the pool holds " +
+           std::to_string(limits.kv_pages);
+  }
+  return "";
+}
+
+void Scheduler::submit(Request request) {
+  const std::string error = check(limits_, request.prompt, request.max_new_tokens);
+  if (!error.empty()) fail("request " + std::to_string(request.id) + ": " + error);
+  waiting_.push_back(std::move(request));
+}
+
+bool Scheduler::cancel(std::int64_t id) {
+  for (auto it = waiting_.begin(); it != waiting_.end(); ++it) {
+    if (it->id == id) {
+      waiting_.erase(it);
+      return true;
+    }
+  }
+  for (auto it = running_.begin(); it != running_.end(); ++it) {
+    if (it->id == id) {
+      retire(*it);
+      running_.erase(it);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Scheduler::emit(Running& r, std::int32_t token, std::vector<TokenEvent>& events) {
+  TokenEvent e;
+  e.id = r.id;
+  e.token = token;
+  e.index = r.generated++;
+  r.last = token;
+  if (std::find(r.stop_ids.begin(), r.stop_ids.end(), token) != r.stop_ids.end()) {
+    e.finish = FinishReason::kStop;
+  } else if (r.generated == r.target) {
+    e.finish = FinishReason::kLength;
+  }
+  events.push_back(e);
+  if (e.finish == FinishReason::kNone) return false;
+  retire(r);
+  return true;
+}
+
+void Scheduler::retire(const Running& r) {
+  model_.release_slot(r.slot);
+  free_slots_.push_back(r.slot);
+  committed_pages_ -= r.pages;
+}
+
+std::vector<TokenEvent> Scheduler::step() {
+  std::vector<TokenEvent> events;
+
+  // Admit in order; a request that does not fit yet blocks the ones behind it.
+  while (!waiting_.empty() && !free_slots_.empty() &&
+         committed_pages_ + pages_needed(limits_, waiting_.front()) <= limits_.kv_pages) {
+    Request req = std::move(waiting_.front());
+    waiting_.pop_front();
+    Running r{req.id, free_slots_.back(), pages_needed(limits_, req), target_tokens(limits_, req),
+              0, 0, std::move(req.stop_ids)};
+    free_slots_.pop_back();
+    committed_pages_ += r.pages;
+
+    const int len = static_cast<int>(req.prompt.size());
+    model_.forward(req.prompt.data(), len, r.slot);
+    if (!emit(r, model_.argmax_last(len), events)) running_.push_back(std::move(r));
+  }
+  if (running_.empty()) return events;
+
+  std::vector<std::int32_t> ids;
+  std::vector<int> slots;
+  for (const Running& r : running_) {
+    ids.push_back(r.last);
+    slots.push_back(r.slot);
+  }
+  const int n = static_cast<int>(running_.size());
+  model_.forward_decode(ids.data(), slots.data(), n);
+  const std::vector<std::int32_t> next = model_.argmax_rows(n);
+
+  std::vector<Running> still_running;
+  for (int b = 0; b < n; ++b) {
+    if (!emit(running_[b], next[b], events)) still_running.push_back(std::move(running_[b]));
+  }
+  running_ = std::move(still_running);
+  return events;
+}
+
+}  // namespace llm

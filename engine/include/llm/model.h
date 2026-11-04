@@ -94,6 +94,9 @@ class Model {
 
   void reset_cache() { cache_.reset_all(); }
 
+  // Empties one sequence's slot and returns its pages to the pool.
+  void release_slot(int slot) { cache_.reset(slot); }
+
   const KVCache& cache() const { return cache_; }
   void shuffle_cache_pages(std::uint32_t seed) { cache_.shuffle_free_pages(seed); }
 
