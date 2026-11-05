@@ -41,6 +41,20 @@ int main(int argc, char** argv) {
   const std::vector<float> expected_row0(expected.begin(), expected.begin() + n_out);
   if (!check_close("gemm(M=1)", got_row0, expected_row0, 2e-3f, 2e-3f)) return EXIT_FAILURE;
 
+  // 150 rows (the fixture's rows repeated) span several row tiles, the last one ragged.
+  {
+    constexpr int kBigM = 150;
+    const std::vector<float> x_big = repeat_rows(load_fp32(fixture, "input"), m_rows, k_in, kBigM);
+    const llm::DeviceBuffer d_xb = llm::make_device_buffer(x_big);
+    llm::DeviceBuffer d_yb(static_cast<std::size_t>(kBigM) * n_out * sizeof(float));
+    llm::launch_gemm_fp16(d_w.as<__half>(), d_xb.as<float>(), d_yb.as<float>(), kBigM, n_out, k_in);
+    LLM_CUDA_CHECK_LAUNCH();
+    const std::vector<float> got = download_fp32(d_yb, static_cast<std::size_t>(kBigM) * n_out);
+    const std::vector<float> want = repeat_rows(expected, m_rows, n_out, kBigM);
+    const std::string big_label = std::string("gemm(M=150)");
+    if (!check_close(big_label.c_str(), got, want, 2e-3f, 2e-3f)) return EXIT_FAILURE;
+  }
+
   // Batched GEMV on the first m rows, at sizes on each side of the kernel's instance boundaries.
   for (const int m : {2, 3, 4, 5, 8, 9, 16}) {
     llm::DeviceBuffer d_yb(static_cast<std::size_t>(m) * n_out * sizeof(float));

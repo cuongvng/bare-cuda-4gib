@@ -11,6 +11,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -89,6 +90,16 @@ inline DeviceBuffer upload_raw(const ModelFile& file, const std::string& name) {
 inline DeviceBuffer upload_fp32(const ModelFile& file, const std::string& name) {
   const std::vector<float> host = load_fp32(file, name);
   return make_device_buffer(host);
+}
+
+// Repeats a [rows, width] row-major matrix cyclically to want_rows rows, for shapes beyond a fixture.
+inline std::vector<float> repeat_rows(const std::vector<float>& v, int rows, int width, int want_rows) {
+  std::vector<float> out(static_cast<std::size_t>(want_rows) * width);
+  for (int r = 0; r < want_rows; ++r) {
+    std::copy_n(v.begin() + static_cast<std::size_t>(r % rows) * width, width,
+                out.begin() + static_cast<std::size_t>(r) * width);
+  }
+  return out;
 }
 
 inline std::vector<float> download_fp32(const DeviceBuffer& buf, std::size_t count) {
